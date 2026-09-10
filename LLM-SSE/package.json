@@ -1,0 +1,15 @@
+{
+  "name": "llm-sse",
+  "version": "1.0.0",
+  "description": "零依赖的 LLM 流式 SSE 调用 Demo（OpenAI 及兼容 OpenAI 接口）",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "cli": "node examples/node-cli.js",
+    "web": "node examples/static-server.js",
+    "mock": "node examples/mock-sse-server.js"
+  }
+}

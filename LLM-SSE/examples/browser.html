@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="4cX4SC1uz5ufEaCJje1rJH">
+<head data-page-node-id="2QI7WbpXga9sRXH2Z4JZGm">
+<meta charset="UTF-8" data-page-node-id="etsVscH8GtdfBrRZFsHv9X" />
+<meta name="viewport" content="width=device-width, initial-scale=1" data-page-node-id="3XeNlPHQEpyEVwA2X42TPE" />
+<title>LLM-SSE 流式调用 Demo</title>
+<style>
+  :root {
+    --bg: #f7f8fa;
+    --card: #ffffff;
+    --border: #e3e6ea;
+    --text: #1f2329;
+    --muted: #8a9099;
+    --brand: #2563eb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .wrap { max-width: 820px; margin: 0 auto; padding: 24px 20px 40px; }
+  h1 { font-size: 18px; font-weight: 600; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px 18px; margin-bottom: 16px;
+  }
+  .step { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .step:last-child { margin-bottom: 0; }
+  .step-tag {
+    flex: none; width: 22px; height: 22px; border-radius: 50%;
+    background: #eef2ff; color: var(--brand); font-size: 12px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .step-body { flex: 1; min-width: 0; display: flex; gap: 8px; flex-wrap: wrap; }
+  label.field { flex: none; width: 62px; color: var(--muted); font-size: 13px; }
+  select, input[type="text"], input[type="password"], textarea {
+    border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px;
+    font: inherit; background: #fff; color: var(--text); outline: none;
+  }
+  select:focus, input:focus, textarea:focus { border-color: var(--brand); }
+  .grow { flex: 1; min-width: 200px; }
+  .note { color: var(--muted); font-size: 12px; margin: 6px 0 0 32px; }
+  .chat { min-height: 220px; max-height: 52vh; overflow-y: auto; }
+  .msg { margin-bottom: 16px; }
+  .who { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .bubble {
+    white-space: pre-wrap; word-break: break-word; background: #f2f4f7;
+    border-radius: 10px; padding: 10px 12px;
+  }
+  .msg.me .bubble { background: #e8f0fe; }
+  .msg.err .bubble { background: #fdecec; color: #a32d2d; }
+  .cursor::after { content: "\258C"; color: var(--brand); animation: blink 1s step-end infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .bar { display: flex; gap: 8px; align-items: flex-end; }
+  textarea { flex: 1; resize: vertical; min-height: 44px; }
+  button {
+    border: 1px solid var(--border); background: #fff; border-radius: 8px;
+    padding: 8px 16px; font: inherit; cursor: pointer; color: var(--text);
+  }
+  button.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .foot { color: var(--muted); font-size: 12px; margin-top: 10px; display: flex; gap: 16px; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+</style>
+</head>
+<body data-page-node-id="A0UIywaVMDojglRRAvGGFP">
+<div class="wrap" data-page-node-id="AtpEypDDxf7JRwwu7DPDi9">
+  <h1 data-page-node-id="bunE6hkTHDbfxGg6tN9xZp">LLM-SSE · 流式调用 Demo</h1>
+  <div class="sub" data-page-node-id="FI41Cnuna7j2qqMIiTkKlH">选厂商 → 选模型 → 填 Key，三步即可开始。全程零依赖，SSE 逐帧手写解析。</div>
+
+  <div class="card" data-page-node-id="4wDFzDXGCwyScYFBRIzEQp">
+    <div class="step" data-page-node-id="rTOu0zHUxkOLy40yBYzCnB">
+      <div class="step-tag" data-page-node-id="JmVUReIT2XNZiVsqjsLZF8">1</div>
+      <div class="step-body" data-page-node-id="MSdfFOmyw2D29gl7YmAjJu">
+        <label class="field" for="provider" data-page-node-id="VVNS5OXIHjNeGp4jYjLPBO">厂商</label>
+        <select id="provider" class="grow" data-page-node-id="4xSOkhp5Hx7ku9L29id489"></select>
+      </div>
+    </div>
+
+    <div class="step" data-page-node-id="MczJpDsnv13bADmrhoebKq">
+      <div class="step-tag" data-page-node-id="GrDcBzFwoZBkoqfoQxw870">2</div>
+      <div class="step-body" data-page-node-id="LWFhmz063gnOAX9lDV0etu">
+        <label class="field" for="modelSelect" data-page-node-id="BExJFnJ3REpbXVhYyT8LLM">模型</label>
+        <select id="modelSelect" class="grow" data-page-node-id="hUdFBwsiI4xfEa9m8DQshs"></select>
+        <input id="modelCustom" class="grow" type="text" placeholder="输入模型名" hidden data-page-node-id="2hGb7fToBiC2rYD2Uq1fBr" />
+      </div>
+    </div>
+
+    <div class="step" data-page-node-id="d19mnCru36gyi9rv0ELiCm">
+      <div class="step-tag" data-page-node-id="XEAf8OUjCFxM62uikh1Jv6">3</div>
+      <div class="step-body" data-page-node-id="DG1xtauAMrG9m1Cz4np0Fw">
+        <label class="field" for="apiKey" data-page-node-id="N0dPUfxn9kqPk7pojpJWl7">API Key</label>
+        <input id="apiKey" class="grow" type="password" placeholder="sk-..." autocomplete="off" data-page-node-id="0nz52kIYh6fWsw23qPCwaL" />
+      </div>
+    </div>
+
+    <div class="step" data-page-node-id="50Cxqlkxu7FeFtGDNDaVjE">
+      <div class="step-tag" style="background:#f2f4f7;color:#8a9099" data-page-node-id="RWmrzoWACKjk3EwMzQxPDg">&middot;</div>
+      <div class="step-body" data-page-node-id="APo2OwxSR74yw4rGQM5Dfk">
+        <label class="field" for="baseUrl" data-page-node-id="y5S5q4hggd4Hce1UDhgkMD">Base URL</label>
+        <input id="baseUrl" class="grow" type="text" placeholder="https://api.openai.com/v1" data-page-node-id="Hkt1InhrAu5RtnynnagX6E" />
+      </div>
+    </div>
+
+    <div class="note" id="providerNote" data-page-node-id="QXNjd2DQiwleSpDj7ZGdEF"></div>
+    <div class="hint" data-page-node-id="DnUQFNOUyqyGJoF4ZoEI6l">配置保存在浏览器 localStorage，不会上传。生产环境请改成后端转发，别把 Key 暴露在前端。</div>
+  </div>
+
+  <div class="card chat" id="chat" data-page-node-id="IpvjEy6ihCo77edrCNT0xf"></div>
+
+  <div class="bar" data-page-node-id="3Jc2E3R7gJGyfHvHVYZTQG">
+    <textarea id="input" placeholder="输入问题，Enter 发送 / Shift+Enter 换行"></textarea>
+    <button id="send" class="primary" data-page-node-id="2IOvoOZjKFi6NtwmYfeGCW">发送</button>
+    <button id="stop" disabled data-page-node-id="9FYE148uoirhPAZIjcGhLe">停止</button>
+  </div>
+  <div class="foot" data-page-node-id="b38JQ3DdUVUHBe6BJM3Eq3">
+    <span id="stat" data-page-node-id="gryrAKVAcO5D68kEIFsetQ">就绪</span>
+    <button id="clear" style="padding:2px 10px;font-size:12px" data-page-node-id="Qq8yDosB45I6qFokJLCVXH">清空对话</button>
+  </div>
+</div>
+
+<script type="module">
+import { ChatSession } from '../src/chat-session.js';
+import { PROVIDERS, getProvider, isKeyRequired } from '../src/providers.js';
+
+const LS_KEY = 'llm-sse-config';
+const SYS = '你是一个简洁、直接的中文助手。';
+const saved = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
+
+const $ = (id) => document.getElementById(id);
+const els = {
+  provider: $('provider'),
+  modelSelect: $('modelSelect'),
+  modelCustom: $('modelCustom'),
+  apiKey: $('apiKey'),
+  baseUrl: $('baseUrl'),
+  note: $('providerNote'),
+  chat: $('chat'),
+  input: $('input'),
+  send: $('send'),
+  stop: $('stop'),
+  clear: $('clear'),
+  stat: $('stat'),
+};
+
+PROVIDERS.forEach((p) => {
+  const opt = document.createElement('option');
+  opt.value = p.id;
+  opt.textContent = p.name;
+  els.provider.appendChild(opt);
+});
+els.provider.value = saved.providerId && getProvider(saved.providerId).id === saved.providerId
+  ? saved.providerId
+  : 'deepseek';
+
+function renderModels(keepModel) {
+  const p = getProvider(els.provider.value);
+  els.note.textContent = p.note || '';
+
+  if (!els.baseUrl.dataset.dirty || !els.baseUrl.value) els.baseUrl.value = p.baseURL || '';
+
+  els.modelSelect.innerHTML = '';
+  if (p.models.length) {
+    p.models.forEach((m) => {
+      const opt = document.createElement('option');
+      opt.value = m;
+      opt.textContent = m;
+      els.modelSelect.appendChild(opt);
+    });
+    const custom = document.createElement('option');
+    custom.value = '__custom__';
+    custom.textContent = '自定义模型名…';
+    els.modelSelect.appendChild(custom);
+
+    const want = keepModel || p.defaultModel || p.models[0];
+    if (p.models.includes(want)) {
+      els.modelSelect.value = want;
+      els.modelSelect.hidden = false;
+      els.modelCustom.hidden = true;
+    } else {
+      els.modelSelect.value = '__custom__';
+      els.modelSelect.hidden = false;
+      els.modelCustom.hidden = false;
+      els.modelCustom.value = want || '';
+    }
+  } else {
+    els.modelSelect.hidden = true;
+    els.modelCustom.hidden = false;
+    els.modelCustom.value = keepModel || '';
+    els.modelCustom.placeholder = p.modelPlaceholder || '输入模型名';
+  }
+}
+
+function currentConfig() {
+  const p = getProvider(els.provider.value);
+  const useCustom = els.modelSelect.hidden || els.modelSelect.value === '__custom__';
+  return {
+    providerId: p.id,
+    providerName: p.name,
+    baseURL: els.baseUrl.value.trim(),
+    model: (useCustom ? els.modelCustom.value : els.modelSelect.value).trim(),
+    apiKey: els.apiKey.value.trim(),
+  };
+}
+
+function persist() {
+  const cfg = currentConfig();
+  localStorage.setItem(LS_KEY, JSON.stringify(cfg));
+  return cfg;
+}
+
+els.provider.addEventListener('change', () => {
+  els.baseUrl.dataset.dirty = '';
+  renderModels('');
+  persist();
+});
+els.modelSelect.addEventListener('change', () => {
+  const custom = els.modelSelect.value === '__custom__';
+  els.modelCustom.hidden = !custom;
+  if (custom) els.modelCustom.focus();
+  persist();
+});
+[els.modelCustom, els.apiKey].forEach((el) => el.addEventListener('change', persist));
+els.baseUrl.addEventListener('input', () => {
+  els.baseUrl.dataset.dirty = '1';
+  persist();
+});
+
+let session = null;
+let cfgKey = '';
+
+function ensureSession(cfg) {
+  const key = cfg.baseURL + '|' + cfg.model + '|' + cfg.apiKey;
+  if (!session || key !== cfgKey) {
+    const history = session ? session.getMessages() : [];
+    session = new ChatSession({
+      baseURL: cfg.baseURL,
+      apiKey: cfg.apiKey,
+      model: cfg.model,
+      systemPrompt: SYS,
+      maxTurns: 10,
+    });
+    if (history.length) session.setMessages(history);
+    cfgKey = key;
+  }
+  return session;
+}
+
+function addBubble(role, text) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg ' + role;
+  const who = document.createElement('div');
+  who.className = 'who';
+  who.textContent = role === 'me' ? '你' : role === 'err' ? '错误' : '助手';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = text;
+  wrap.appendChild(who);
+  wrap.appendChild(bubble);
+  els.chat.appendChild(wrap);
+  els.chat.scrollTop = els.chat.scrollHeight;
+  return { wrap, bubble };
+}
+
+let controller = null;
+let raf = 0;
+
+async function send() {
+  const text = els.input.value.trim();
+  if (!text) return;
+  const cfg = persist();
+  const provider = getProvider(cfg.providerId);
+
+  if (!cfg.model) { alert('请填写模型名（第 2 步）'); return; }
+  if (!cfg.baseURL) { alert('请填写 Base URL'); return; }
+  if (!cfg.apiKey && isKeyRequired(provider) && !/localhost|127\.0\.0\.1/.test(cfg.baseURL)) {
+    if (!confirm('没有填 API Key，可能产生 401。仍要继续吗？')) return;
+  }
+
+  els.input.value = '';
+  addBubble('me', text);
+
+  const { wrap, bubble } = addBubble('bot', '');
+  bubble.classList.add('cursor');
+
+  controller = new AbortController();
+  els.send.disabled = true;
+  els.stop.disabled = false;
+
+  const startedAt = performance.now();
+  let firstTokenAt = 0;
+  let pending = '';
+
+  const flush = () => {
+    raf = 0;
+    bubble.textContent = pending;
+    els.chat.scrollTop = els.chat.scrollHeight;
+  };
+
+  try {
+    const result = await ensureSession(cfg).send(text, {
+      signal: controller.signal,
+      onDelta: (delta, full) => {
+        if (!firstTokenAt) firstTokenAt = performance.now();
+        pending = full;
+        if (!raf) raf = requestAnimationFrame(flush);
+      },
+    });
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+    flush();
+
+    const ms = performance.now() - startedAt;
+    const ttft = firstTokenAt ? firstTokenAt - startedAt : null;
+    const tokens = result.usage && result.usage.completion_tokens;
+    const parts = [
+      result.aborted ? '已中断' : (result.finishReason || 'done'),
+      ttft ? '首 token ' + Math.round(ttft) + 'ms' : null,
+      '耗时 ' + (ms / 1000).toFixed(2) + 's',
+      tokens ? tokens + ' tokens · ' + (tokens / (ms / 1000)).toFixed(1) + ' tok/s' : null,
+    ].filter(Boolean);
+    els.stat.textContent = parts.join(' · ');
+  } catch (err) {
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+    if (err.name === 'AbortError') {
+      bubble.textContent = pending || '[已中断]';
+      els.stat.textContent = '已中断';
+    } else {
+      wrap.remove();
+      addBubble('err', err.message + (err.status ? '（HTTP ' + err.status + ' ' + (err.code || '') + '）' : ''));
+      els.stat.textContent = '请求失败';
+    }
+  } finally {
+    bubble.classList.remove('cursor');
+    controller = null;
+    els.send.disabled = false;
+    els.stop.disabled = true;
+  }
+}
+
+els.send.addEventListener('click', send);
+els.stop.addEventListener('click', () => controller && controller.abort());
+els.clear.addEventListener('click', () => {
+  if (session) session.clear();
+  els.chat.innerHTML = '';
+  els.stat.textContent = '已清空上下文';
+});
+els.input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    send();
+  }
+});
+
+els.baseUrl.value = saved.baseURL || '';
+els.apiKey.value = saved.apiKey || '';
+renderModels(saved.model || '');
+if (saved.baseURL) els.baseUrl.dataset.dirty = '1';
+els.input.focus();
+</script>
+</body>
+</html>

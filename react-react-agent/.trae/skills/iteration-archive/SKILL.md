@@ -48,6 +48,7 @@ description: "Archive feature changes into docs/功能演进时间线.md of reac
 | AbortController、stop 按钮、signal 透传、中断行为 | 手动停止 |
 | vite proxy、CORS、.env、API Key、部署/后端转发 | 工程配套（CORS 代理与 Key 管理） |
 | JSX、渲染、着色、setState/flat、光标、UI 交互 | 控制台 UI |
+| langfuse/trace/观测/上报、Generation/Span 埋点 | 可观测性（Langfuse Trace 链路） |
 
 > 模块名以文档当前章节标题为准（上表为其快照）；若文档后续增删了模块，以文档为准。
 

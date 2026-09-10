@@ -1,6 +1,7 @@
-import { callLLMStream } from './llm'
+import { callLLMStream, LLM_MODEL } from './llm'
 import { tools, toolImpl } from './tools'
 import { parseArgs } from './utils'
+import { lf, langfuseEnabled } from './langfuse'
 
 /**
  * ReAct while 主循环（真实流式版）
@@ -20,75 +21,131 @@ export async function agent(userPrompt, onLog, o = {}) {
   let totalCompletionTokens = 0
   let totalTokens = 0
 
-  // 结束时统一汇总：用时 + token 消耗
-  const finish = (msg, type = 'ok') => {
+  // 🔗 Langfuse 全链路观测：一次运行 = 一条 Trace（每轮 LLM = Generation，每次工具 = Span）
+  const trace = lf.trace({
+    name: 'ReAct Agent 运行',
+    input: userPrompt,
+    metadata: { maxIterations },
+  })
+  if (langfuseEnabled) onLog(`\n🔗 Langfuse 观测已开启 ｜ trace: ${trace.id}`, 'meta')
+
+  // 结束时统一汇总：用时 + token 消耗（同时写回 Langfuse Trace 收口）
+  const finish = (msg, type = 'ok', output = null) => {
     const elapsed = ((Date.now() - startedAt) / 1000).toFixed(2) // 秒
+    trace.update({
+      output,
+      level: type === 'warn' ? 'WARNING' : 'DEFAULT',
+      statusMessage: type === 'warn' ? msg.trim() : undefined,
+      metadata: {
+        elapsedSec: +elapsed,
+        totalTokens,
+        promptTokens: totalPromptTokens,
+        completionTokens: totalCompletionTokens,
+      },
+    })
     onLog(msg, type)
     onLog(`\n⏱️ 总用时 ${elapsed}s ｜ 🧮 Token 消耗: ${totalTokens} (输入 ${totalPromptTokens} + 输出 ${totalCompletionTokens})`, 'meta')
+    lf.flushAsync?.().catch?.(() => {}) // 运行一结束就上报，不等 SDK 内部批量周期
   }
 
   let step = 0
-  while (true) {
-    // 【终止条件①】达到最大循环次数 —— 防止无限死循环兜底
-    if (step >= maxIterations) {
-      finish('⚠️ 达到最大迭代上限，停止', 'warn')
-      return
-    }
-    step++
-    onLog(`\n[第 ${step} 轮] `, 'step')
-
-    // ---------- Thought → Action：流式返回，边生成边打印 ----------
-    const assistantMsg = await callLLMStream(messages, {
-      signal: o.signal,
-      // 正文与工具名都流式逐字打印（工具名前缀+分隔由 llm 端带上）
-      onDelta: (text, type) => {
-        if (type === 'content' || type === 'tool' || type === 'action') onToken(text, type)
-      },
-    })
-    messages.push(assistantMsg)
-
-    // 累加本轮 token 消耗
-    if (assistantMsg.usage) {
-      totalPromptTokens += assistantMsg.usage.prompt_tokens || 0
-      totalCompletionTokens += assistantMsg.usage.completion_tokens || 0
-      totalTokens += assistantMsg.usage.total_tokens || 0
-    }
-
-    const toolCalls = assistantMsg.tool_calls || []
-    if (toolCalls.length) {
-      // ---------- Action + Action Input ----------
-      for (const tc of toolCalls) {
-        const { name, arguments: argsStr } = tc.function
-        const args = parseArgs(argsStr, onLog)
-        // 工具名已由 llm 流式打出，这里补打完整参数 JSON
-        onLog(`${argsStr}\n`, 'action')
-
-        // ---------- 执行工具，Observation 也逐字流式打出（制造节奏） ----------
-        let obs
-        try {
-          obs = await toolImpl[name](args)
-        } catch (e) {
-          obs = `工具出错: ${e.message}`
-        }
-        onLog('\n   Observation: ', 'obs')
-        await typeOut(String(obs), onToken) // 逐字推送 Observation
-
-        // Observation → 回填上下文（需配对 tool_call_id），供下一轮思考
-        messages.push({ role: 'tool', tool_call_id: tc.id, content: obs })
+  try {
+    while (true) {
+      // 【终止条件①】达到最大循环次数 —— 防止无限死循环兜底
+      if (step >= maxIterations) {
+        finish('⚠️ 达到最大迭代上限，停止', 'warn')
+        return
       }
-      continue // 💡 回到 while，模型基于 Observation 继续
-    }
+      step++
+      onLog(`\n[第 ${step} 轮] `, 'step')
 
-    // 【终止条件②】无工具调用且返回正文 → 正常结束（正文已流式打完了）
-    const answer = (assistantMsg.content || '').trim()
-    if (answer) {
-      finish('\n✅ 任务完成')
-      return
+      // ---------- Thought → Action：流式返回，边生成边打印 ----------
+      // 🔗 每轮 LLM 调用上报为 Generation：输入=完整上下文，输出=正文+工具调用，usage 来自 include_usage 帧
+      const lfGen = trace.generation({
+        name: `第 ${step} 轮 LLM 调用`,
+        model: LLM_MODEL,
+        modelParameters: { temperature: 0 },
+        input: messages,
+      })
+      const assistantMsg = await callLLMStream(messages, {
+        signal: o.signal,
+        // 正文与工具名都流式逐字打印（工具名前缀+分隔由 llm 端带上）
+        onDelta: (text, type) => {
+          if (type === 'content' || type === 'tool' || type === 'action') onToken(text, type)
+        },
+      })
+      const u = assistantMsg.usage ?? {}
+      lfGen.end({
+        output: {
+          content: assistantMsg.content,
+          tool_calls: (assistantMsg.tool_calls || []).map((tc) => ({
+            name: tc.function.name,
+            arguments: tc.function.arguments,
+          })),
+        },
+        usage: {
+          promptTokens: u.prompt_tokens ?? 0,
+          completionTokens: u.completion_tokens ?? 0,
+          totalTokens: u.total_tokens ?? 0,
+        },
+      })
+      messages.push(assistantMsg)
+
+      // 累加本轮 token 消耗
+      if (assistantMsg.usage) {
+        totalPromptTokens += assistantMsg.usage.prompt_tokens || 0
+        totalCompletionTokens += assistantMsg.usage.completion_tokens || 0
+        totalTokens += assistantMsg.usage.total_tokens || 0
+      }
+
+      const toolCalls = assistantMsg.tool_calls || []
+      if (toolCalls.length) {
+        // ---------- Action + Action Input ----------
+        for (const tc of toolCalls) {
+          const { name, arguments: argsStr } = tc.function
+          const args = parseArgs(argsStr, onLog)
+          // 工具名已由 llm 流式打出，这里补打完整参数 JSON
+          onLog(`${argsStr}\n`, 'action')
+
+          // ---------- 执行工具，Observation 也逐字流式打出（制造节奏） ----------
+          // 🔗 每次工具执行上报为 Span：输入=参数，输出=Observation，出错标 ERROR 级
+          const lfSpan = trace.span({ name: `工具 ${name}`, input: args })
+          let obs
+          try {
+            obs = await toolImpl[name](args)
+            lfSpan.end({ output: obs })
+          } catch (e) {
+            obs = `工具出错: ${e.message}`
+            lfSpan.end({ output: obs, level: 'ERROR', statusMessage: e.message })
+          }
+          onLog('\n   Observation: ', 'obs')
+          await typeOut(String(obs), onToken) // 逐字推送 Observation
+
+          // Observation → 回填上下文（需配对 tool_call_id），供下一轮思考
+          messages.push({ role: 'tool', tool_call_id: tc.id, content: obs })
+        }
+        continue // 💡 回到 while，模型基于 Observation 继续
+      }
+
+      // 【终止条件②】无工具调用且返回正文 → 正常结束（正文已流式打完了）
+      const answer = (assistantMsg.content || '').trim()
+      if (answer) {
+        finish('\n✅ 任务完成', 'ok', answer)
+        return
+      }
+      if (step >= maxIterations) {
+        finish('⚠️ 空输出，停止', 'warn')
+        return
+      }
     }
-    if (step >= maxIterations) {
-      finish('⚠️ 空输出，停止', 'warn')
-      return
-    }
+  } catch (e) {
+    // 🔗 手动停止 / API 出错也收口 Trace，Langfuse 里能看到中断的运行
+    trace.update({
+      output: null,
+      level: e.name === 'AbortError' ? 'WARNING' : 'ERROR',
+      statusMessage: e.message,
+    })
+    throw e
   }
 }
 

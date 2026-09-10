@@ -6,6 +6,8 @@ const CFG = {
   apiKey: import.meta.env.VITE_API_KEY ?? 'sk-xxxxxx', // 推荐 .env 注入
 }
 
+export const LLM_MODEL = CFG.model // 供观测层（Langfuse Generation）标注模型名
+
 /**
  * 真实流式调用 LLM（stream: true，SSE）。
  * @param o.onDelta (text, type) 逐 token 回调，即时打印

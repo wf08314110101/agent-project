@@ -41,6 +41,11 @@ npm run dev            # 打开 http://localhost:5173
 
 ```env
 VITE_API_KEY=sk-你的key
+
+# 可选：Langfuse 观测（三个都填才开启）
+VITE_LANGFUSE_HOST=https://cloud.langfuse.com
+VITE_LANGFUSE_PUBLIC_KEY=pk-lf-xxx
+VITE_LANGFUSE_SECRET_KEY=sk-lf-xxx
 ```
 
 模型与接口地址在 [src/llm.js](src/llm.js) 顶部的 `CFG` 配置：

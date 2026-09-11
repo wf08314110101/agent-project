@@ -4,16 +4,18 @@ import { parseArgs } from './utils'
 
 /**
  * ReAct while 主循环（真实流式版）
- * @param userPrompt 用户问题
+ * 多轮对话：messages 是「会话级」共享数组（跨多次调用累积），
+ *           每一轮的 assistant/tool/Observation 都会 push 进来，
+ *           下一轮问题直接在此基础上继续，天然带上历史上下文。
+ * @param messages 共享上下文数组（调用方需先 push 当前用户消息）
  * @param onLog (text, type) 一次性日志（换行、分隔、错误提示等）
  * @param o.onToken (ch, type) 逐 token 回调：LLM 的 token 与工具输出都走这里，实现真流式
  * @param o.maxIterations 最大循环次数（防无限死循环）
  * @param o.signal 用于手动停止
  */
-export async function agent(userPrompt, onLog, o = {}) {
+export async function agent(messages, onLog, o = {}) {
   const maxIterations = o.maxIterations ?? 6
-  const onToken = o.onToken ?? (() => {})
-  const messages = [{ role: 'user', content: userPrompt }]
+  const onToken = o.onToken ?? (() => { })
 
   const startedAt = Date.now() // ⏱ 任务总用时起点
   let totalPromptTokens = 0
@@ -38,6 +40,7 @@ export async function agent(userPrompt, onLog, o = {}) {
     onLog(`\n[第 ${step} 轮] `, 'step')
 
     // ---------- Thought → Action：流式返回，边生成边打印 ----------
+    console.log('agent-43行 2026-09-10', messages)
     const assistantMsg = await callLLMStream(messages, {
       signal: o.signal,
       // 正文与工具名都流式逐字打印（工具名前缀+分隔由 llm 端带上）

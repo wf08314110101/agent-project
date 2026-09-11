@@ -4,6 +4,7 @@ const CFG = {
   apiBase: '/api/v1', // 走 vite proxy，避免浏览器 CORS；生产改为后端真实地址
   model: 'deepseek-chat', // 你的 DS v4 flash 模型 id
   apiKey: import.meta.env.VITE_API_KEY ?? 'sk-xxxxxx', // 推荐 .env 注入
+  maxTokens: 2048, // 🎯 max_tokens：单次生成的 token 上限（防单轮输出过长/烧钱）
 }
 
 /**
@@ -28,6 +29,7 @@ export async function callLLMStream(messages, { onDelta, signal } = {}) {
       stream: true,
       // 标准做法：流结束前把 usage 通过 SSE 主体推过来（比自定义 header 可靠）
       stream_options: { include_usage: true },
+      max_tokens: CFG.maxTokens, // max_tokens：限制单次输出长度
     }),
     signal,
   })

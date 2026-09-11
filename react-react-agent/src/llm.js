@@ -7,6 +7,8 @@ const CFG = {
   maxTokens: 2048, // 🎯 max_tokens：单次生成的 token 上限（防单轮输出过长/烧钱）
 }
 
+export const LLM_MODEL = CFG.model // 供观测层（Langfuse Generation）标注模型名
+
 /**
  * 真实流式调用 LLM（stream: true，SSE）。
  * @param o.onDelta (text, type) 逐 token 回调，即时打印

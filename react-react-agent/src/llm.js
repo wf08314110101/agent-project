@@ -13,10 +13,11 @@ export const LLM_MODEL = CFG.model // 供观测层（Langfuse Generation）标�
  * 真实流式调用 LLM（stream: true，SSE）。
  * @param o.onDelta (text, type) 逐 token 回调，即时打印
  * @param o.signal AbortController，支持中途停止
- * @param o.model 覆盖模型(预算降级时切换小模型用)
+ * @param o.model 覆盖模型(可选)
+ * @param o.maxTokens 覆盖单次输出上限(摘要等小调用用)
  * @returns { role, content, tool_calls, usage: { prompt_tokens, completion_tokens, total_tokens } }
  */
-export async function callLLMStream(messages, { onDelta, signal, model } = {}) {
+export async function callLLMStream(messages, { onDelta, signal, model, maxTokens } = {}) {
   const res = await fetch(`${CFG.apiBase}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -32,7 +33,7 @@ export async function callLLMStream(messages, { onDelta, signal, model } = {}) {
       stream: true,
       // 标准做法：流结束前把 usage 通过 SSE 主体推过来（比自定义 header 可靠）
       stream_options: { include_usage: true },
-      max_tokens: CFG.maxTokens, // max_tokens：限制单次输出长度
+      max_tokens: maxTokens ?? CFG.maxTokens, // max_tokens：限制单次输出长度
     }),
     signal,
   })

@@ -27,7 +27,7 @@ export function createBudget(o = {}) {
     if (est > cfg.perTurnTokens)
       return { status: 'degrade', act: 'trim', reason: `本轮预估 ${est} 超单轮软限 ${cfg.perTurnTokens}` }
     if (used / cfg.totalTokens >= cfg.degradeAt)
-      return { status: 'degrade', act: 'swap', reason: `已用 ${used}(${((used / cfg.totalTokens) * 100) | 0}%)，接近预算` }
+      return { status: 'degrade', act: 'summarize', reason: `已用 ${used}(${((used / cfg.totalTokens) * 100) | 0}%)，接近预算` }
     return { status: 'ok' }
   }
 

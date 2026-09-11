@@ -54,9 +54,7 @@ export async function agent(messages, onLog, o = {}) {
   let step = 0
   // 💸 预算管理：分层预算 + 预估/记账 + 检查点止损
   const budget = createBudget(o.budget)
-  const smallModel = o.budget?.smallModel // 降级时切换的小模型(可选)
-  let currentModel = LLM_MODEL
-  const TRIM_KEEP = 8 // 裁剪后保留最近消息条数
+  const TRIM_KEEP = 8 // 裁剪/摘要后保留尾部消息条数
   // 统一收口：打印止损原因并走 finish
   const stopByBudget = (b) => {
     onLog(`💸 预算止损: ${b.reason}`, 'warn')
@@ -77,9 +75,15 @@ export async function agent(messages, onLog, o = {}) {
         if (b.act === 'trim') {
           messages.splice(0, Math.max(0, messages.length - TRIM_KEEP)) // 裁剪历史降 token
           onLog(`✂️ 预算降级: ${b.reason}，历史已裁剪至最近 ${TRIM_KEEP} 条`, 'warn')
-        } else if (b.act === 'swap' && smallModel && currentModel !== smallModel) {
-          currentModel = smallModel // 切换小模型
-          onLog(`🔻 预算降级: ${b.reason}，切换模型 → ${smallModel}`, 'warn')
+        } else if (b.act === 'summarize') {
+          const su = await summarizeHistory(messages, onLog)
+          if (su) {
+            budget.spend(su) // 摘要调用计入真实消耗
+            onLog(`🧠 预算降级: ${b.reason}，历史已压缩为摘要`, 'warn')
+          } else {
+            messages.splice(0, Math.max(0, messages.length - TRIM_KEEP)) // 摘要失败兜底裁剪
+            onLog(`✂️ 摘要失败，回退裁剪至最近 ${TRIM_KEEP} 条`, 'warn')
+          }
         } else {
           onLog(`💸 预算预警: ${b.reason}`, 'warn')
         }
@@ -90,13 +94,12 @@ export async function agent(messages, onLog, o = {}) {
       // 🔗 每轮 LLM 调用上报为 Generation：输入=完整上下文，输出=正文+工具调用，usage 来自 include_usage 帧
       const lfGen = trace.generation({
         name: `第 ${step} 轮 LLM 调用`,
-        model: currentModel,
+        model: LLM_MODEL,
         modelParameters: { temperature: 0 },
         input: messages,
       })
       const assistantMsg = await callLLMStream(messages, {
         signal: o.signal,
-        model: currentModel, // 降级后可切小模型
         // 正文与工具名都流式逐字打印（工具名前缀+分隔由 llm 端带上）
         onDelta: (text, type) => {
           if (type === 'content' || type === 'tool' || type === 'action') onToken(text, type)
@@ -215,4 +218,46 @@ async function typeOut(text, onToken, ms = 15) {
 /** 是否值得重试：仅瞬时网络错误（fetch 连接失败 / HTTP 5xx / 429）；参数与业务类错误重试无意义 */
 function isRetryable(e) {
   return e?.name === 'TypeError' || /HTTP (5\d\d|429)/.test(e?.message ?? '')
+}
+
+/**
+ * 预算降级：把 messages 前部压缩为摘要，尾部保留完整（工具配对 + 近期上下文）。
+ * 摘要作为 system 消息置顶，返回摘要调用 usage 计入预算；失败返回 null（调用方兜底裁剪）。
+ */
+async function summarizeHistory(messages, onLog) {
+  const KEEP = 6 // 尾部保留条数：需覆盖最近一次 assistant(tool_calls)+tool 往返
+  const head = messages.slice(0, Math.max(0, messages.length - KEEP))
+  const tail = messages.slice(-KEEP)
+  const system = head.filter((m) => m.role === 'system')
+  const body = head.filter((m) => m.role !== 'system')
+  if (!body.length) return null // 无可压缩内容
+
+  try {
+    const text = body
+      .map((m) => {
+        const tool = m.tool_calls
+          ? ' | ' + m.tool_calls.map((tc) => `调用 ${tc.function.name}(${tc.function.arguments})`).join('; ')
+          : ''
+        return `${m.role}: ${m.content ?? ''}${tool}`
+      })
+      .join('\n')
+    const sm = await callLLMStream(
+      [
+        ...system,
+        {
+          role: 'user',
+          content: `请将以下对话历史压缩为简洁摘要，保留关键事实、工具执行结论与未解决问题，不要输出无关内容。\n\n${text}`,
+        },
+      ],
+      { maxTokens: 512 } // 摘要用小输出预算
+    )
+    const summary = (sm?.content ?? '').trim()
+    if (!summary) return null
+    messages.length = 0
+    messages.push({ role: 'system', content: `[对话历史摘要] ${summary}` }, ...tail)
+    return sm.usage
+  } catch (e) {
+    onLog(`⚠️ 摘要生成失败: ${e.message}`, 'warn')
+    return null
+  }
 }

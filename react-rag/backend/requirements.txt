@@ -1,0 +1,21 @@
+# RAG 后端依赖（可用 uv 安装：uv venv && uv pip install -r requirements.txt）
+fastapi              # API 框架
+uvicorn[standard]    # ASGI 服务器
+python-multipart     # FastAPI 文件上传
+chromadb             # 向量库
+# ---- 嵌入模型版本锁定（Intel Mac torch 最高 2.2.2，需配套旧版） ----
+numpy<2              # torch 2.2.2 与 numpy2 ABI 不兼容
+torch==2.2.2         # macOS x86_64 官方最高版本
+transformers==4.44.2  # 兼容 torch 2.2；4.48+ 的 torch>=2.6 安全检查 Intel Mac 过不了
+sentence-transformers==4.1.0 # 兼容 torch 2.2 + transformers 4.x
+pypdf                # PDF 解析
+pdf2image            # OCR：PDF 每页转图片（依赖系统 poppler）
+pytesseract          # OCR：图片文字识别（依赖系统 tesseract）
+pillow               # OCR 图像处理
+mammoth              # Word .docx 解析
+python-docx          # Word .docx 解析（备选，读段落）
+openai               # OpenAI 兼容客户端 → 对接 DeepSeek
+python-dotenv        # 加载 backend/.env
+
+# 说明：sentence-transformers 依赖 torch；若想只跑 CPU，默认装就是 CPU 版。
+# 说明（OCR 系统依赖，macOS）：brew install poppler tesseract tesseract-lang

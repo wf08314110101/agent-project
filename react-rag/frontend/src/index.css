@@ -1,0 +1,46 @@
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #0f1115;
+  color: #e5e7eb;
+}
+h1, h2 { margin: 0 0 8px; }
+button {
+  cursor: pointer;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 14px;
+  background: #2563eb;
+  color: #fff;
+}
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+input[type='text'], textarea {
+  width: 100%;
+  background: #1f2937;
+  border: 1px solid #374151;
+  color: #e5e7eb;
+  border-radius: 8px;
+  padding: 10px;
+}
+.tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+.tabs button { background: #1f2937; }
+.tabs button.active { background: #2563eb; }
+.card {
+  background: #1a1f2b;
+  border: 1px solid #2a3242;
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.src {
+  background: #11161f;
+  border-left: 3px solid #f59e0b;
+  padding: 8px 12px;
+  border-radius: 6px;
+  margin: 6px 0;
+  font-size: 13px;
+  color: #cbd5e1;
+}
+.answer { white-space: pre-wrap; line-height: 1.6; }
+.hint { color: #9ca3af; font-size: 12px; }

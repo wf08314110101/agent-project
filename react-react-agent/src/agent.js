@@ -26,7 +26,7 @@ export async function agent(messages, onLog, o = {}) {
   // 🔗 Langfuse 全链路观测：一次运行 = 一条 Trace（每轮 LLM = Generation，每次工具 = Span）
   const trace = lf.trace({
     name: 'ReAct Agent 运行',
-    input: userPrompt,
+    input: messages,
     metadata: { maxIterations },
   })
   if (langfuseEnabled) onLog(`\n🔗 Langfuse 观测已开启 ｜ trace: ${trace.id}`, 'meta')

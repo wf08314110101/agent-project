@@ -51,8 +51,17 @@ export const toolImpl = {
     return String(Math.round(val * 100) / 100) // 保留两位
   },
   async get_weather({ city }) {
-    // 演示：可换成真实天气 API。这里模拟返回值
-    return `${city} 今日晴，26℃，空气质量优`
+    // 真实 API：Open-Meteo（免费无 key，允许跨域）。城市名 → 经纬度 → 当前天气
+    const geo = await fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=zh`)
+    if (!geo.ok) throw new Error(`城市解析接口异常 HTTP ${geo.status}`)
+    const loc = (await geo.json()).results?.[0]
+    if (!loc) throw new Error(`找不到城市：${city}`)
+    const res = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${loc.latitude}&longitude=${loc.longitude}&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m&timezone=auto`)
+    if (!res.ok) throw new Error(`天气接口异常 HTTP ${res.status}`)
+    const w = (await res.json()).current
+    // WMO 天气代码 → 中文描述
+    const codes = { 0: '晴', 1: '基本晴', 2: '多云', 3: '阴', 45: '雾', 48: '雾凇', 51: '小毛毛雨', 53: '毛毛雨', 55: '大毛毛雨', 61: '小雨', 63: '中雨', 65: '大雨', 66: '冻雨', 67: '强冻雨', 71: '小雪', 73: '中雪', 75: '大雪', 77: '雪粒', 80: '小阵雨', 81: '阵雨', 82: '强阵雨', 85: '小阵雪', 86: '大阵雪', 95: '雷阵雨', 96: '雷阵雨伴冰雹', 99: '强雷阵雨伴冰雹' }
+    return `${loc.name}（${loc.country ?? ''}）当前 ${codes[w.weather_code] ?? '天气未知'} ${w.temperature_2m}℃ ｜ 湿度 ${w.relative_humidity_2m}% ｜ 风速 ${w.wind_speed_10m} km/h`
   },
   async get_luck({ constellation }) {
     // 真实 API：celesian.com（免费无 key，允许跨域）。中文星座 → 英文签名映射

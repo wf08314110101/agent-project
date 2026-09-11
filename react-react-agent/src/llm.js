@@ -13,9 +13,10 @@ export const LLM_MODEL = CFG.model // 供观测层（Langfuse Generation）标�
  * 真实流式调用 LLM（stream: true，SSE）。
  * @param o.onDelta (text, type) 逐 token 回调，即时打印
  * @param o.signal AbortController，支持中途停止
+ * @param o.model 覆盖模型(预算降级时切换小模型用)
  * @returns { role, content, tool_calls, usage: { prompt_tokens, completion_tokens, total_tokens } }
  */
-export async function callLLMStream(messages, { onDelta, signal } = {}) {
+export async function callLLMStream(messages, { onDelta, signal, model } = {}) {
   const res = await fetch(`${CFG.apiBase}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -23,7 +24,7 @@ export async function callLLMStream(messages, { onDelta, signal } = {}) {
       Authorization: `Bearer ${CFG.apiKey}`,
     },
     body: JSON.stringify({
-      model: CFG.model,
+      model: model ?? CFG.model,
       messages,
       tools,
       tool_choice: 'auto',

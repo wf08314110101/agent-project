@@ -2,6 +2,7 @@ import { callLLMStream, LLM_MODEL } from './llm'
 import { tools, toolImpl, networkTools } from './tools'
 import { parseArgs, validateArgs } from './utils'
 import { lf, langfuseEnabled } from './langfuse'
+import { createBudget } from './budget'
 
 /**
  * ReAct while 主循环（真实流式版）
@@ -51,6 +52,16 @@ export async function agent(messages, onLog, o = {}) {
   }
 
   let step = 0
+  // 💸 预算管理：分层预算 + 预估/记账 + 检查点止损
+  const budget = createBudget(o.budget)
+  const smallModel = o.budget?.smallModel // 降级时切换的小模型(可选)
+  let currentModel = LLM_MODEL
+  const TRIM_KEEP = 8 // 裁剪后保留最近消息条数
+  // 统一收口：打印止损原因并走 finish
+  const stopByBudget = (b) => {
+    onLog(`💸 预算止损: ${b.reason}`, 'warn')
+    finish('⚠️ 触发预算上限，提前结束', 'warn')
+  }
   try {
     while (true) {
       // 【终止条件①】达到最大循环次数 —— 防止无限死循环兜底
@@ -59,18 +70,33 @@ export async function agent(messages, onLog, o = {}) {
         return
       }
       step++
+      // 【预算检查点①】每轮调用前：预估止损 + 降级处置
+      const b = budget.check(messages)
+      if (b.status === 'stop') { stopByBudget(b); return }
+      if (b.status === 'degrade') {
+        if (b.act === 'trim') {
+          messages.splice(0, Math.max(0, messages.length - TRIM_KEEP)) // 裁剪历史降 token
+          onLog(`✂️ 预算降级: ${b.reason}，历史已裁剪至最近 ${TRIM_KEEP} 条`, 'warn')
+        } else if (b.act === 'swap' && smallModel && currentModel !== smallModel) {
+          currentModel = smallModel // 切换小模型
+          onLog(`🔻 预算降级: ${b.reason}，切换模型 → ${smallModel}`, 'warn')
+        } else {
+          onLog(`💸 预算预警: ${b.reason}`, 'warn')
+        }
+      }
       onLog(`\n[第 ${step} 轮] `, 'step')
 
       // ---------- Thought → Action：流式返回，边生成边打印 ----------
       // 🔗 每轮 LLM 调用上报为 Generation：输入=完整上下文，输出=正文+工具调用，usage 来自 include_usage 帧
       const lfGen = trace.generation({
         name: `第 ${step} 轮 LLM 调用`,
-        model: LLM_MODEL,
+        model: currentModel,
         modelParameters: { temperature: 0 },
         input: messages,
       })
       const assistantMsg = await callLLMStream(messages, {
         signal: o.signal,
+        model: currentModel, // 降级后可切小模型
         // 正文与工具名都流式逐字打印（工具名前缀+分隔由 llm 端带上）
         onDelta: (text, type) => {
           if (type === 'content' || type === 'tool' || type === 'action') onToken(text, type)
@@ -99,6 +125,11 @@ export async function agent(messages, onLog, o = {}) {
         totalCompletionTokens += assistantMsg.usage.completion_tokens || 0
         totalTokens += assistantMsg.usage.total_tokens || 0
       }
+
+      // 【预算检查点②】真实记账：以 API usage 为准，超硬预算立即停（预估可能低估）
+      budget.spend(assistantMsg.usage)
+      const b2 = budget.check([])
+      if (b2.status === 'stop') { stopByBudget(b2); return }
 
       const toolCalls = assistantMsg.tool_calls || []
       if (toolCalls.length) {

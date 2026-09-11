@@ -79,3 +79,6 @@ export const toolImpl = {
     return `${constellation} 今日运势(${data.date})：${data.horoscope}`
   },
 }
+
+/** 网络型工具：瞬时错误（连接失败 / HTTP 5xx / 429）允许 agent 层有限重试 */
+export const networkTools = new Set(['get_weather', 'get_luck'])

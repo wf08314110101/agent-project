@@ -1,6 +1,6 @@
 import { callLLMStream, LLM_MODEL } from './llm'
-import { tools, toolImpl } from './tools'
-import { parseArgs } from './utils'
+import { tools, toolImpl, networkTools } from './tools'
+import { parseArgs, validateArgs } from './utils'
 import { lf, langfuseEnabled } from './langfuse'
 
 /**
@@ -109,16 +109,38 @@ export async function agent(messages, onLog, o = {}) {
           // 工具名已由 llm 流式打出，这里补打完整参数 JSON
           onLog(`${argsStr}\n`, 'action')
 
-          // ---------- 执行工具，Observation 也逐字流式打出（制造节奏） ----------
+          // ---------- 参数校验：按工具声明的 JSON Schema 校验，失败转 Observation 回喂模型自我修正 ----------
+          const schema = tools.find((t) => t.function.name === name)?.function.parameters
+          const verr = validateArgs(args, schema)
           // 🔗 每次工具执行上报为 Span：输入=参数，输出=Observation，出错标 ERROR 级
           const lfSpan = trace.span({ name: `工具 ${name}`, input: args })
           let obs
-          try {
-            obs = await toolImpl[name](args)
-            lfSpan.end({ output: obs })
-          } catch (e) {
-            obs = `工具出错: ${e.message}`
-            lfSpan.end({ output: obs, level: 'ERROR', statusMessage: e.message })
+          if (verr) {
+            obs = `参数校验失败: ${verr}`
+            lfSpan.end({ output: obs, level: 'WARNING', statusMessage: verr })
+          } else {
+            // ---------- 执行工具：网络型工具对瞬时错误有限重试（退避 500ms/1s），attempt 记入 Langfuse ----------
+            const maxAttempts = networkTools.has(name) ? 3 : 1 // 首次 + 最多 2 次重试
+            let err = null
+            let attempts = 0
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+              attempts = attempt
+              try {
+                obs = await toolImpl[name](args)
+                lfSpan.end({ output: obs, metadata: { attempt: attempts } })
+                err = null
+                break
+              } catch (e) {
+                err = e
+                if (!(attempt < maxAttempts && isRetryable(e))) break
+                onLog(`⚠️ 第 ${attempt} 次调用失败（${e.message}），${500 * attempt}ms 后重试`, 'warn')
+                await new Promise((r) => setTimeout(r, 500 * attempt)) // 指数退避
+              }
+            }
+            if (err) {
+              obs = `工具出错: ${err.message}`
+              lfSpan.end({ output: obs, level: 'ERROR', statusMessage: err.message, metadata: { attempts } })
+            }
           }
           onLog('\n   Observation: ', 'obs')
           await typeOut(String(obs), onToken) // 逐字推送 Observation
@@ -157,4 +179,9 @@ async function typeOut(text, onToken, ms = 15) {
     onToken(ch, 'obs')
     await new Promise((r) => setTimeout(r, ms))
   }
+}
+
+/** 是否值得重试：仅瞬时网络错误（fetch 连接失败 / HTTP 5xx / 429）；参数与业务类错误重试无意义 */
+function isRetryable(e) {
+  return e?.name === 'TypeError' || /HTTP (5\d\d|429)/.test(e?.message ?? '')
 }

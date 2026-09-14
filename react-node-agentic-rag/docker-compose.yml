@@ -1,0 +1,39 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: agentic-rag-qdrant
+    ports: ["6333:6333", "6334:6334"]
+    volumes: ["qdrant_data:/qdrant/storage"]
+    restart: unless-stopped
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: agentic-rag-phoenix
+    ports: ["6006:6006"]
+    volumes: ["phoenix_data:/mnt/data"]
+    restart: unless-stopped
+
+  # 应用后端：env_file 提供密钥，environment 覆盖容器网内地址
+  backend:
+    build: ./backend
+    container_name: agentic-rag-backend
+    env_file: ./backend/.env
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      PHOENIX_ENDPOINT: http://phoenix:6006/v1/traces
+    volumes:
+      - ./backend/data:/app/data # sqlite + 嵌入模型缓存持久化
+    depends_on: [qdrant]
+    restart: unless-stopped
+
+  # 应用前端：nginx 托管 dist 并反代 /api
+  frontend:
+    build: ./frontend
+    container_name: agentic-rag-frontend
+    ports: ["8080:80"]
+    depends_on: [backend]
+    restart: unless-stopped
+
+volumes:
+  qdrant_data:
+  phoenix_data:

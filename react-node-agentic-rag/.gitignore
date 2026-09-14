@@ -1,0 +1,7 @@
+node_modules/
+.env
+backend/.models/
+backend/data/
+dist/
+logs/
+vite.config.js.*

@@ -1,20 +1,30 @@
+// ============================================================================
+// 会话路由：会话列表 / 消息回放 / 会话删除
+// ----------------------------------------------------------------------------
+// 配合 chat 路由的持久化：assistant 消息 meta 列存了 {sources, steps, usage,
+// stopReason}，回放时原样反序列化给前端，实现"刷新页面可完整还原推理过程"。
+// ============================================================================
+
 import { listSessions, getSession, deleteSession, deleteSessionMsgs, listMsgs } from '../store/sqlite.js'
 
 export default async function (app) {
+  // 会话列表（倒序），含标题与创建时间
   app.get('/api/sessions', () => listSessions.all())
 
+  // 会话消息回放：meta（JSON 字符串）解析为对象后随消息返回
   app.get('/api/sessions/:id/messages', (req, reply) => {
     const s = getSession.get(req.params.id)
     if (!s) return reply.code(404).send({ error: '会话不存在' })
     return listMsgs.all(s.id).map((m) => ({
-      seq: m.seq,
-      role: m.role,
-      content: m.content,
-      meta: m.meta ? JSON.parse(m.meta) : null,
+      seq: m.seq,                    // 全局自增序号，前端可据此排序
+      role: m.role,                  // user | assistant
+      content: m.content,            // 消息正文
+      meta: m.meta ? JSON.parse(m.meta) : null, // {sources, steps, usage, stopReason}
       created_at: m.created_at,
     }))
   })
 
+  // 删除会话：先删消息再删会话本身（避免残留孤儿消息）
   app.delete('/api/sessions/:id', (req) => {
     deleteSessionMsgs.run(req.params.id) // 先删消息，再删会话
     deleteSession.run(req.params.id)

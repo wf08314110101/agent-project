@@ -1,6 +1,20 @@
+// ============================================================================
+// 服务入口：组装 Fastify 应用、注册插件与路由、启动摄取 worker、优雅退出
+// ----------------------------------------------------------------------------
+// 启动流程：
+//   1. initOtel()            → 可选开启 OTel → Phoenix 链路观测
+//   2. 创建 Fastify 实例      → 日志 + 请求体上限
+//   3. 注册 cors/multipart/rate-limit 插件
+//   4. 注册 4 组业务路由      → health / documents / sessions / chat
+//   5. 启动摄取 worker        → 单并发后台消费 pending 文档（解析→切块→嵌入→入库）
+//   6. ensureCollection()    → 幂等确保 Qdrant 集合存在（失败不阻塞启动）
+//   7. 监听端口，开始对外服务
+// 退出流程：SIGINT/SIGTERM → 停 worker → 关闭 HTTP → process.exit(0)
+// ============================================================================
+
 import Fastify from 'fastify'
 import cors from '@fastify/cors'
-import multipart from '@fastify/multipart'
+import multipart from '@fastify/multipart' // 文件上传（multipart/form-data）支持
 import rateLimit from '@fastify/rate-limit'
 import { config } from './config.js'
 import { ensureCollection } from './rag/qdrant.js'
@@ -11,26 +25,31 @@ import chatRoutes from './routes/chat.js'
 import sessionRoutes from './routes/sessions.js'
 import { initOtel } from './obs/phoenix.js'
 
-initOtel() // PHOENIX_ENABLED=true 时启 OTel → Phoenix
+// PHOENIX_ENABLED=true 时启用 OpenTelemetry SDK，把 span 导出到 Phoenix
+initOtel()
 
 const app = Fastify({
-  logger: { level: 'info' },
-  bodyLimit: 32 * 1024 * 1024,
+  logger: { level: 'info' },          // 内置 pino 日志，info 级别
+  bodyLimit: 32 * 1024 * 1024,        // JSON 请求体上限 32MB（文件走 multipart，另有独立限制）
 })
 
+// ---- 插件注册（await 确保顺序：cors/multipart/rate-limit 先于路由生效）----
 await app.register(cors, { origin: config.corsOrigin })
 await app.register(multipart)
 await app.register(rateLimit, {
-  global: true,
-  max: config.rate.globalMax,
+  global: true,                        // 全局限流对所有路由生效
+  max: config.rate.globalMax,          // 每分钟最大请求数
   timeWindow: '1 minute',
 })
-app.register(healthRoutes)
-app.register(documentRoutes)
-app.register(sessionRoutes)
-app.register(chatRoutes)
+
+// ---- 业务路由 ----
+app.register(healthRoutes)    // GET  /api/health          健康检查
+app.register(documentRoutes)  // 文档上传 / 列表 / 删除
+app.register(sessionRoutes)   // 会话列表 / 消息回放 / 删除
+app.register(chatRoutes)      // POST /api/chat            SSE 流式问答（核心）
 
 // 摄取 worker：单并发后台消费 pending 文档
+// 单并发原因：嵌入是 CPU 密集操作（transformers.js），多并发会互相争抢 CPU
 const ingest = createIngestWorker(app.log)
 ingest.start()
 
@@ -41,6 +60,7 @@ try {
   app.log.warn(`[qdrant] 启动检查失败: ${e.message}`)
 }
 
+// ---- 优雅退出：先停 worker（不再取新任务）→ 关闭 HTTP（等待在途请求）→ 退出 ----
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, async () => {
     await ingest.stop()
@@ -49,6 +69,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
   })
 }
 
+// 监听 0.0.0.0（允许容器/局域网访问），启动失败则打日志并以非零码退出
 app
   .listen({ port: config.port, host: '0.0.0.0' })
   .then(() => app.log.info(`API → http://localhost:${config.port}`))

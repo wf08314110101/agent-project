@@ -1,5 +1,14 @@
+// ============================================================================
 // 主图：ReAct agent loop（LangGraph 状态图）
-// agent(流式 LLM+工具绑定) → 有 tool_calls ? tools(执行+回填) : END；tools → 回 agent
+// ----------------------------------------------------------------------------
+// 拓扑：
+//   START → agent →（有 tool_calls 且未超轮数）→ tools → agent → ...
+//                →（无 tool_calls 或超轮数）→ END
+// 每轮对应 ReAct 的一次循环：
+//   agent 节点 = Thought（流式调 LLM，正文 token 通过 emit('delta') 转发前端）
+//   tools 节点 = Action（发起工具调用）+ Observation（结果以 role:tool 回填上下文）
+// ============================================================================
+
 import { StateGraph, Annotation, START, END } from '@langchain/langgraph'
 import { chatStream } from '../llm.js'
 import { config } from '../config.js'
@@ -7,19 +16,27 @@ import { toolDefs, runTool } from './tools.js'
 import { FORCE_ANSWER } from './prompts.js'
 import { otelSpan } from '../obs/phoenix.js'
 
+// 状态定义：Annotation 描述每个字段的合并策略（reducer）
 const AgentState = Annotation.Root({
+  // messages 采用 concat 合并：节点返回的消息数组会追加到已有历史之后
   messages: Annotation({ reducer: (x, y) => x.concat(y), default: () => [] }),
+  // stepCount 直接覆盖：记录当前是第几轮（用于超轮数强制直答）
   stepCount: Annotation({ reducer: (_, y) => y, default: () => 0 }),
+  // stopReason 直接覆盖：结束原因（max_iter=超轮数 / 正常结束保持 null）
   stopReason: Annotation({ reducer: (_, y) => y, default: () => null }),
 })
 
 // Thought 阶段：流式调 LLM（正文 token 直接走 delta 事件）
 async function agentNode(state, cfg) {
+  // configurable 是 LangGraph 传递运行时上下文的通道（贯穿主图与子图）
   const c = cfg?.configurable ?? {}
   const stepCount = state.stepCount + 1
+
+  // 超过最大轮数 → 注入 FORCE_ANSWER 系统提示并禁用工具，逼模型立即作答（防死循环）
   const force = stepCount > config.agent.maxIterations
   const messages = force ? [...state.messages, { role: 'system', content: FORCE_ANSWER }] : state.messages
 
+  // ---- 观测埋点：Langfuse generation + Phoenix/OTel span 双写 ----
   const lfGen = c.trace?.generation?.({
     name: `第 ${stepCount} 轮`,
     model: config.llm.model,
@@ -27,9 +44,10 @@ async function agentNode(state, cfg) {
   })
   const span = otelSpan(`agent.round-${stepCount}`, 'LLM', {
     'llm.model_name': config.llm.model,
-    'input.value': JSON.stringify(messages).slice(0, 2000),
+    'input.value': JSON.stringify(messages).slice(0, 2000), // 截断防止 span 过大
   })
 
+  // 流式调用：onDelta 把正文 token 实时转发给前端（打字机效果）
   const { message, usage } = await chatStream(messages, {
     tools: force ? undefined : toolDefs,
     toolChoice: force ? 'none' : undefined, // 超轮数：强制直接作答
@@ -37,6 +55,7 @@ async function agentNode(state, cfg) {
     onDelta: (text) => c.emit?.('delta', { text }),
   })
 
+  // 累计每轮 usage，路由层最后统一汇总
   c.usageAcc?.push(usage)
   lfGen?.end?.({
     output: message,
@@ -48,6 +67,7 @@ async function agentNode(state, cfg) {
   })
   span.end(message.content)
 
+  // 返回新状态：追加 assistant 消息 + 更新轮数；force 时标记 stopReason
   return { messages: [message], stepCount, stopReason: force ? 'max_iter' : state.stopReason }
 }
 
@@ -66,16 +86,21 @@ async function toolsNode(state, cfg) {
   const last = state.messages[state.messages.length - 1]
   const newMsgs = []
 
+  // 可能一次请求携带多个 tool_calls，逐个执行
   for (const tc of last.tool_calls) {
+    // 解析工具参数：模型输出的 arguments 是 JSON 字符串，解析失败按空参数处理
     let args = {}
     try {
       args = JSON.parse(tc.function.arguments || '{}')
-    } catch {}
+    } catch { }
+
+    // Action 事件：告知前端模型决定调用什么工具
     c.emit?.('step', { phase: 'action', label: tc.function.name, content: tc.function.arguments })
 
     const lfSpan = c.trace?.span?.({ name: `工具 ${tc.function.name}`, input: args })
     const span = otelSpan(`tool.${tc.function.name}`, 'TOOL', { 'input.value': tc.function.arguments })
 
+    // 执行工具：任何异常都转成 Observation 字符串回喂模型，让模型自我修正而不是整轮失败
     let obs
     try {
       obs = await runTool(tc.function.name, args, cfg)
@@ -87,25 +112,36 @@ async function toolsNode(state, cfg) {
       span.end(obs)
     }
 
+    // Observation 事件：截断展示给前端（完整内容仍在上下文里）
     c.emit?.('step', {
       phase: 'observation',
       label: tc.function.name,
       content: String(obs).length > 200 ? String(obs).slice(0, 200) + '…' : String(obs),
     })
+    // OpenAI 规范：工具结果必须以 role:'tool' + tool_call_id 回填
     newMsgs.push({ role: 'tool', tool_call_id: tc.id, content: obs })
   }
   return { messages: newMsgs }
 }
 
+// ---- 编译状态图：节点 + 边（条件边由 route 决定走向）----
 export const agentGraph = new StateGraph(AgentState)
   .addNode('agent', agentNode)
   .addNode('tools', toolsNode)
-  .addEdge(START, 'agent')
-  .addConditionalEdges('agent', route)
-  .addEdge('tools', 'agent')
+  .addEdge(START, 'agent')              // 入口
+  .addConditionalEdges('agent', route)  // agent 后按 route 条件跳转
+  .addEdge('tools', 'agent')            // 工具执行完回到 agent（ReAct 循环）
   .compile()
 
-// 供路由调用的门面：emitter/trace/signal/topK 经 configurable 贯穿主图与子图
+/**
+ * 供路由调用的门面：emitter/trace/signal/topK 经 configurable 贯穿主图与子图
+ * @param {Array}  messages - 初始消息（system + 历史 + 当前 user 问题）
+ * @param {number} topK     - 检索条数，透传给 search_kb 子图
+ * @param {AbortSignal} signal - 客户端断开时中断 LLM 请求
+ * @param {Function} emit   - SSE 事件发射器 (event, data)
+ * @param {Object}  trace   - Langfuse trace 对象（含 generation/span 方法）
+ * @param {Array}   usageAcc- usage 累积数组，路由层最后汇总
+ */
 export function runAgent({ messages, topK = 5, signal, emit, trace, usageAcc }) {
   return agentGraph.invoke(
     { messages, stepCount: 0 },

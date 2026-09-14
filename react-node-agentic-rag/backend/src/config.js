@@ -1,52 +1,73 @@
+// ============================================================================
+// 全局配置模块：集中读取环境变量并导出一份不可变的配置对象
+// ----------------------------------------------------------------------------
+// 作用：
+//   1. 进程启动时通过 `dotenv/config` 自动加载 backend/.env 文件到 process.env；
+//   2. 所有模块统一从这里取配置，避免散落各处直接读 process.env；
+//   3. 每个配置项都提供合理的默认值，保证"零配置"也能跑起来（本地开发友好）。
+// 读取优先级：真实环境变量 > .env 文件 > 代码内默认值
+// ============================================================================
+
 import 'dotenv/config'
 
+// 读取字符串环境变量，k 为变量名，d 为缺省值（两者都允许 undefined）
 const env = (k, d) => process.env[k] ?? d
+
+// 读取整型环境变量：统一转成十进制数字，解析失败得到 NaN（由调用方兜底）
 const int = (k, d) => Number.parseInt(env(k, String(d)), 10)
 
 export const config = {
-  port: int('PORT', 8788),
-  corsOrigin: env('CORS_ORIGIN', true),
-  uploadMaxMb: int('UPLOAD_MAX_MB', 20),
+  // ---- HTTP 服务 ----
+  port: int('PORT', 8788),                 // Fastify 监听端口
+  corsOrigin: env('CORS_ORIGIN', true),    // CORS 允许的来源；true = 反射任意 Origin（开发期方便）
+  uploadMaxMb: int('UPLOAD_MAX_MB', 20),   // 单个上传文件大小上限（MB），同时用于 multipart 限制与 413 提示
 
-  qdrantUrl: env('QDRANT_URL', 'http://localhost:6333'),
-  qdrantCollection: env('QDRANT_COLLECTION', 'agentic_docs'),
-  sqlitePath: env('SQLITE_PATH', './data/app.db'),
-  uploadsDir: env('UPLOADS_DIR', './data/uploads'), // 摄取队列暂存原件
+  // ---- 存储层 ----
+  qdrantUrl: env('QDRANT_URL', 'http://localhost:6333'),      // Qdrant 向量数据库 REST 地址
+  qdrantCollection: env('QDRANT_COLLECTION', 'agentic_docs'), // 向量集合名（一个知识库一个集合）
+  sqlitePath: env('SQLITE_PATH', './data/app.db'),            // SQLite 文件路径（文档元数据/会话/消息）
+  uploadsDir: env('UPLOADS_DIR', './data/uploads'),           // 摄取队列暂存原件（worker 处理完即删）
 
-  // 限流（每分钟）：全局 + chat 单独收紧
+  // ---- 限流（每分钟）：全局 + chat 单独收紧 ----
   rate: {
-    globalMax: int('RATE_LIMIT_MAX', 120),
-    chatMax: int('CHAT_RATE_LIMIT_MAX', 20),
+    globalMax: int('RATE_LIMIT_MAX', 120),      // 全局限流：所有路由合计 120 次/分钟/IP
+    chatMax: int('CHAT_RATE_LIMIT_MAX', 20),    // chat 路由单独 20 次/分钟（LLM 调用成本高，需更严）
   },
 
-  // 降级：知识库无资料时允许基于通用知识直答（回答需注明）
+  // ---- 降级策略：知识库无资料时允许 LLM 基于通用知识直答（回答需注明来源）----
   fallbackDirect: env('FALLBACK_DIRECT', 'true') === 'true',
 
+  // ---- LLM（OpenAI 兼容协议，默认指向 DeepSeek）----
   llm: {
-    baseUrl: env('LLM_BASE_URL', 'https://api.deepseek.com/v1'),
-    apiKey: env('LLM_API_KEY', ''),
-    model: env('LLM_MODEL', 'deepseek-chat'),
+    baseUrl: env('LLM_BASE_URL', 'https://api.deepseek.com/v1'), // OpenAI 兼容 API 的 base URL
+    apiKey: env('LLM_API_KEY', ''),                              // API Key（必填才能真正调通）
+    model: env('LLM_MODEL', 'deepseek-chat'),                    // 对话模型名
   },
 
+  // ---- 嵌入模型（本地 CPU 推理，不依赖外部 embedding API）----
   embed: {
-    model: env('EMBED_MODEL', 'Xenova/bge-small-zh-v1.5'),
-    dim: int('EMBED_DIM', 512),
-    device: env('EMBED_DEVICE', 'cpu'),
-    endpoint: env('HF_ENDPOINT', 'https://hf-mirror.com'), // 模型下载镜像（国内）
+    model: env('EMBED_MODEL', 'Xenova/bge-small-zh-v1.5'), // 中文小模型，输出 512 维向量
+    dim: int('EMBED_DIM', 512),                            // 向量维度，必须与 Qdrant 集合定义一致
+    device: env('EMBED_DEVICE', 'cpu'),                    // 推理设备（transformers.js 支持 cpu/webgpu 等）
+    endpoint: env('HF_ENDPOINT', 'https://hf-mirror.com'), // 模型下载镜像（国内访问 HuggingFace 加速）
   },
 
+  // ---- 检索阈值：相似度低于该分数的结果直接丢弃（粗过滤噪声）----
   retrieveMinScore: Number(env('RETRIEVE_MIN_SCORE', '0.3')),
 
+  // ---- Agent 行为控制 ----
   agent: {
-    maxIterations: int('AGENT_MAX_ITERATIONS', 6), // 主图最大轮数（防死循环）
-    searchMaxAttempts: int('SEARCH_MAX_ATTEMPTS', 2), // search_kb 子图最大检索尝试
+    maxIterations: int('AGENT_MAX_ITERATIONS', 6),   // 主图最大轮数（防死循环；超过则强制直答）
+    searchMaxAttempts: int('SEARCH_MAX_ATTEMPTS', 2), // search_kb 子图最大"改写→重检"尝试次数
   },
 
+  // ---- Langfuse 观测（可选）：三项都配置才启用，用于 trace/generation 记录 ----
   langfuse: {
     host: env('LANGFUSE_HOST', ''),
     publicKey: env('LANGFUSE_PUBLIC_KEY', ''),
     secretKey: env('LANGFUSE_SECRET_KEY', ''),
   },
-  phoenixEnabled: env('PHOENIX_ENABLED', 'false') === 'true', // OTel → Phoenix
-  phoenixEndpoint: env('PHOENIX_ENDPOINT', 'http://localhost:6006/v1/traces'),
+  // ---- Phoenix 观测（可选）：OpenTelemetry → Phoenix，默认关闭 ----
+  phoenixEnabled: env('PHOENIX_ENABLED', 'false') === 'true',
+  phoenixEndpoint: env('PHOENIX_ENDPOINT', 'http://localhost:6006/v1/traces'), // Phoenix 的 OTLP 接收端点
 }

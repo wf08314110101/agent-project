@@ -1,6 +1,14 @@
-// 工具定义 + 实现：search_knowledge(子图) / calculator / get_current_time
+// ============================================================================
+// 工具定义 + 实现：search_knowledge（走 CRAG 子图）/ calculator / get_current_time
+// ----------------------------------------------------------------------------
+// toolDefs  : 提供给 LLM 的工具 JSON Schema（function calling 规范）
+// runTool   : Action 分发点，按工具名执行并返回 Observation 字符串
+// 设计原则：工具出错不抛异常，而是把错误文本作为 Observation 回喂模型自我修正。
+// ============================================================================
+
 import { searchGraph } from './search-graph.js'
 
+// 工具的 JSON Schema 描述：LLM 依据 description 和 parameters 决定何时调用、怎么传参
 export const toolDefs = [
   {
     type: 'function',
@@ -39,17 +47,25 @@ export const toolDefs = [
   },
 ]
 
+// 白名单正则：只允许数字与四则运算符/括号/百分号/空白，杜绝任意代码注入
 const SAFE_EXPR = /^[0-9+\-*/().%\s]+$/
+
 function calc(expr) {
   if (!SAFE_EXPR.test(expr)) return '表达式包含非法字符'
   try {
+    // 通过 Function 构造器求值（比 eval 稍安全，且已被白名单限制输入）
     return `${expr} = ${Function('"use strict";return (' + expr + ')')()}`
   } catch {
     return '表达式无法计算'
   }
 }
 
-// Action 分发点：返回 Observation 字符串（出错也转 Observation 回喂模型自我修正）
+/**
+ * Action 分发点：返回 Observation 字符串（出错也转 Observation 回喂模型自我修正）
+ * @param {string} name - 工具名（可能来自模型幻觉，需兜底处理）
+ * @param {object} args - 工具参数（主图已 JSON.parse）
+ * @param {object} cfg  - LangGraph cfg，configurable 内含 emit/trace/signal/topK
+ */
 export async function runTool(name, args, cfg) {
   switch (name) {
     case 'search_knowledge': {
@@ -58,8 +74,10 @@ export async function runTool(name, args, cfg) {
         { question: String(args.question ?? ''), queries: [String(args.question ?? '')], attempts: 1 },
         cfg
       )
+      // sources 事件：把最终命中资料推给前端做引用展示
       cfg?.configurable?.emit?.('sources', { sources: res.hits })
       if (!res.hits.length) return `知识库中没有找到与「${args.question}」相关的资料。`
+      // 把命中块拼成带编号+相似度的资料文本，供模型引用 [1][2]...
       const body = res.hits
         .map(
           (h, i) =>

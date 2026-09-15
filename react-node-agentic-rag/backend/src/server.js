@@ -23,10 +23,10 @@ import healthRoutes from './routes/health.js'
 import documentRoutes from './routes/documents.js'
 import chatRoutes from './routes/chat.js'
 import sessionRoutes from './routes/sessions.js'
-import { initOtel } from './obs/phoenix.js'
+import { initObs, flushObs } from './obs/otel.js'
 
-// PHOENIX_ENABLED=true 时启用 OpenTelemetry SDK，把 span 导出到 Phoenix
-initOtel()
+// 启动统一观测层：一次埋点按配置扇出（PHOENIX_ENABLED / LANGFUSE_* 三项）
+initObs()
 
 const app = Fastify({
   logger: { level: 'info' },          // 内置 pino 日志，info 级别
@@ -65,6 +65,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, async () => {
     await ingest.stop()
     await app.close()
+    await flushObs() // 冲刷观测队列，防止尾部 span 丢失
     process.exit(0)
   })
 }

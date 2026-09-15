@@ -13,7 +13,7 @@
 import { randomUUID } from 'node:crypto'
 import { runAgent } from '../agent/graph.js'
 import { AGENT_SYSTEM } from '../agent/prompts.js'
-import { startTrace, flushObs } from '../obs/langfuse.js'
+import { rootSpan, runInCtx, flushObs } from '../obs/otel.js'
 import { insertSession, getSession, insertMsg, listRecentMsgs } from '../store/sqlite.js'
 import { countPoints } from '../rag/qdrant.js'
 import { config } from '../config.js'
@@ -94,11 +94,10 @@ export default async function (app) {
         }
       })
 
-      // Langfuse 链路追踪入口
-      const trace = startTrace({
-        name: 'Agentic RAG 问答',
-        input: { question, sessionId: session.id, topK },
-        metadata: { stage: 'M2' },
+      // 观测根 span：一条 trace = 一次问答（Langfuse 经 langfuse.* 属性命名/分组）
+      const root = rootSpan('Agentic RAG 问答', {
+        'langfuse.session.id': session.id, // 会话分组：同一 session 的 trace 归在一起
+        'input.value': JSON.stringify({ question, topK }).slice(0, 2000),
       })
       const steps = []      // 过程事件存档（落库回放用）
       let sources = []      // 最终引用来源
@@ -112,15 +111,16 @@ export default async function (app) {
       const startedAt = Date.now()
 
       try {
-        // 运行 Agent 主图（ReAct 循环），SSE 事件经 emit 实时外发
-        const result = await runAgent({
-          messages: input,
-          topK,
-          signal: abort.signal,
-          emit,
-          trace,
-          usageAcc,
-        })
+        // 运行 Agent 主图（ReAct 循环）—— 在根 span 上下文内执行，子 span 自动挂树
+        const result = await runInCtx(root, () =>
+          runAgent({
+            messages: input,
+            topK,
+            signal: abort.signal,
+            emit,
+            usageAcc,
+          })
+        )
 
         // 最终答案 = 倒序找最后一条有正文的 assistant 消息
         const answer =
@@ -139,10 +139,10 @@ export default async function (app) {
         )
         const elapsed = +((Date.now() - startedAt) / 1000).toFixed(2)
 
-        trace.update({
-          output: answer,
-          metadata: { elapsedSec: elapsed, rounds: result.stepCount, steps: steps.length, sources: sources.length },
-        })
+        root.setAttr('langfuse.trace.metadata', JSON.stringify({
+          elapsedSec: elapsed, rounds: result.stepCount, steps: steps.length, sources: sources.length,
+        }))
+        root.setAttr('output.value', answer)
 
         // 持久化：步骤/来源/用量随 meta 存档，刷新页面可回放
         insertMsg.run(session.id, 'user', question, null)
@@ -159,19 +159,22 @@ export default async function (app) {
       } catch (e) {
         if (clientGone) {
           // 用户主动关闭页面 → 静默收尾，不算服务端错误
-          trace.update({ level: 'WARNING', statusMessage: '客户端中断' })
+          root.setAttr('langfuse.observation.level', 'WARNING')
+          root.setAttr('langfuse.status_message', '客户端中断')
           send('done', { stopReason: 'abort', sessionId: session.id })
         } else {
           // 服务端错误 → 记日志 + error/done 事件通知前端
           req.log.error(e)
-          trace.update({ level: 'ERROR', statusMessage: e.message })
+          root.setAttr('langfuse.observation.level', 'ERROR')
+          root.setAttr('langfuse.status_message', e.message)
           send('error', { message: e.message })
           send('done', { stopReason: 'error', sessionId: session.id })
         }
       } finally {
-        // 无论成败都要关闭 SSE 流并冲刷观测数据
+        // 无论成败：结束根 span → 关闭 SSE 流 → 冲刷观测数据
+        root.end()
         reply.raw.end()
-        flushObs()
+        await flushObs()
       }
     })
 }

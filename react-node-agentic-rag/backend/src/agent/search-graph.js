@@ -14,7 +14,7 @@ import { search } from '../rag/qdrant.js'
 import { chatStructured } from '../llm.js'
 import { config } from '../config.js'
 import { gradeMessages, rewriteMessages, GRADE_SCHEMA, REWRITE_SCHEMA } from './prompts.js'
-import { otelSpan } from '../obs/phoenix.js'
+import { otelSpan } from '../obs/otel.js'
 
 // 子图状态：attempt 记录已尝试次数，queries 是当前生效的查询词列表
 const SearchState = Annotation.Root({
@@ -62,7 +62,6 @@ async function retrieveNode(state, cfg) {
 // 评估：LLM 逐条判相关 + 判断材料是否足够（返回形状由 GRADE_SCHEMA 经 tool-call 强制）
 async function gradeNode(state, cfg) {
   const c = cfg?.configurable ?? {}
-  const lfGen = c.trace?.generation?.({ name: `相关性评估(第${state.attempts}次)`, input: state.queries })
   const span = otelSpan('search_kb.grade', 'LLM', { 'input.value': state.question })
 
   let grade = null
@@ -73,12 +72,10 @@ async function gradeNode(state, cfg) {
       { name: 'submit_grade', description: '提交相关性评估结果', signal: c.signal }
     )
     grade = args
-    lfGen?.end?.({ output: args, usage: usage && { promptTokens: usage.prompt_tokens, completionTokens: usage.completion_tokens, totalTokens: usage.total_tokens } })
-    span.end(args)
+    span.end(args, { usage })
   } catch (e) {
     // 两轮自纠仍失败：评估器不可用，不阻断主链路 —— 全部保留，宁滥勿缺
-    lfGen?.end?.({ output: e.message, level: 'ERROR', statusMessage: e.message })
-    span.end(`评估失败: ${e.message}`)
+    span.end(`评估失败: ${e.message}`, { level: 'ERROR', statusMessage: e.message })
   }
 
   let hits = state.hits
@@ -106,7 +103,6 @@ async function gradeNode(state, cfg) {
 // 改写：材料不足时换 2 个问法重检（返回形状由 REWRITE_SCHEMA 经 tool-call 强制）
 async function rewriteNode(state, cfg) {
   const c = cfg?.configurable ?? {}
-  const lfGen = c.trace?.generation?.({ name: `查询改写(第${state.attempts}次)`, input: state.question })
   const span = otelSpan('search_kb.rewrite', 'LLM', { 'input.value': state.question })
 
   // 改写提示词包含：原问题 + 已尝试的查询（避免重复）+ 上一轮不足原因（对症改写）
@@ -118,11 +114,9 @@ async function rewriteNode(state, cfg) {
       { name: 'submit_rewrite', description: '提交改写后的检索查询', signal: c.signal }
     )
     queries = args.queries
-    lfGen?.end?.({ output: args, usage: usage && { promptTokens: usage.prompt_tokens, completionTokens: usage.completion_tokens, totalTokens: usage.total_tokens } })
-    span.end(args)
+    span.end(args, { usage })
   } catch (e) {
-    lfGen?.end?.({ output: e.message, level: 'ERROR', statusMessage: e.message })
-    span.end(`改写失败: ${e.message}`)
+    span.end(`改写失败: ${e.message}`, { level: 'ERROR', statusMessage: e.message })
   }
 
   // 清洗改写结果：字符串化 → 滤空 → 最多取 2 个；失败兜底用原问题

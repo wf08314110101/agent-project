@@ -14,7 +14,7 @@ import { chatStream } from '../llm.js'
 import { config } from '../config.js'
 import { toolDefs, runTool, validateToolArgs } from './tools.js'
 import { FORCE_ANSWER } from './prompts.js'
-import { otelSpan } from '../obs/phoenix.js'
+import { otelSpan } from '../obs/otel.js'
 
 // 状态定义：Annotation 描述每个字段的合并策略（reducer）
 const AgentState = Annotation.Root({
@@ -36,12 +36,7 @@ async function agentNode(state, cfg) {
   const force = stepCount > config.agent.maxIterations
   const messages = force ? [...state.messages, { role: 'system', content: FORCE_ANSWER }] : state.messages
 
-  // ---- 观测埋点：Langfuse generation + Phoenix/OTel span 双写 ----
-  const lfGen = c.trace?.generation?.({
-    name: `第 ${stepCount} 轮`,
-    model: config.llm.model,
-    input: messages,
-  })
+  // ---- 观测埋点：单一 OTel 管道（Phoenix/Langfuse 双导出）----
   const span = otelSpan(`agent.round-${stepCount}`, 'LLM', {
     'llm.model_name': config.llm.model,
     'input.value': JSON.stringify(messages).slice(0, 2000), // 截断防止 span 过大
@@ -55,17 +50,9 @@ async function agentNode(state, cfg) {
     onDelta: (text) => c.emit?.('delta', { text }),
   })
 
-  // 累计每轮 usage，路由层最后统一汇总
+  // 累计每轮 usage，路由层最后统一汇总；span 记录输出与 token 用量
   c.usageAcc?.push(usage)
-  lfGen?.end?.({
-    output: message,
-    usage: usage && {
-      promptTokens: usage.prompt_tokens,
-      completionTokens: usage.completion_tokens,
-      totalTokens: usage.total_tokens,
-    },
-  })
-  span.end(message.content)
+  span.end(message.content, { usage })
 
   // 返回新状态：追加 assistant 消息 + 更新轮数；force 时标记 stopReason
   return { messages: [message], stepCount, stopReason: force ? 'max_iter' : state.stopReason }
@@ -106,19 +93,16 @@ async function toolsNode(state, cfg) {
     // Action 事件：告知前端模型决定调用什么工具
     c.emit?.('step', { phase: 'action', label: tc.function.name, content: tc.function.arguments })
 
-    const lfSpan = c.trace?.span?.({ name: `工具 ${tc.function.name}`, input: args })
     const span = otelSpan(`tool.${tc.function.name}`, 'TOOL', { 'input.value': tc.function.arguments })
 
     // 执行工具：任何异常都转成 Observation 字符串回喂模型，让模型自我修正而不是整轮失败
     let obs
     try {
       obs = await runTool(tc.function.name, args, cfg)
-      lfSpan?.end?.({ output: String(obs).slice(0, 500) })
       span.end(String(obs).slice(0, 800))
     } catch (e) {
       obs = `工具出错: ${e.message}`
-      lfSpan?.end?.({ output: obs, level: 'ERROR', statusMessage: e.message })
-      span.end(obs)
+      span.end(obs, { level: 'ERROR', statusMessage: e.message })
     }
 
     // Observation 事件：截断展示给前端（完整内容仍在上下文里）
@@ -143,22 +127,20 @@ export const agentGraph = new StateGraph(AgentState)
   .compile()
 
 /**
- * 供路由调用的门面：emitter/trace/signal/topK 经 configurable 贯穿主图与子图
+ * 供路由调用的门面：emitter/signal/topK/usageAcc 经 configurable 贯穿主图与子图
  * @param {Array}  messages - 初始消息（system + 历史 + 当前 user 问题）
  * @param {number} topK     - 检索条数，透传给 search_kb 子图
  * @param {AbortSignal} signal - 客户端断开时中断 LLM 请求
  * @param {Function} emit   - SSE 事件发射器 (event, data)
- * @param {Object}  trace   - Langfuse trace 对象（含 generation/span 方法）
  * @param {Array}   usageAcc- usage 累积数组，路由层最后汇总
  */
-export function runAgent({ messages, topK = 5, signal, emit, trace, usageAcc }) {
+export function runAgent({ messages, topK = 5, signal, emit, usageAcc }) {
   return agentGraph.invoke(
     { messages, stepCount: 0 },
     {
       configurable: {
         emit,
         signal,
-        trace,
         usageAcc,
         topK,
       },

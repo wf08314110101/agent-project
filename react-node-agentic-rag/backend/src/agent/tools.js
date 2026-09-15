@@ -72,7 +72,7 @@ export function validateToolArgs(name, args) {
  * Action 分发点：返回 Observation 字符串（出错也转 Observation 回喂模型自我修正）
  * @param {string} name - 工具名（可能来自模型幻觉，需兜底处理）
  * @param {object} args - 工具参数（主图已 JSON.parse）
- * @param {object} cfg  - LangGraph cfg，configurable 内含 emit/trace/signal/topK
+ * @param {object} cfg  - LangGraph cfg，configurable 内含 emit/signal/topK/usageAcc
  */
 export async function runTool(name, args, cfg) {
   switch (name) {

@@ -88,7 +88,18 @@ export default async function (app) {
       // emit 双通道：一边实时 SSE 推给前端，一边收集起来随消息落库
       const emit = (event, data) => {
         if (event === 'step') steps.push(data)
-        else if (event === 'sources') sources = data.sources
+        else if (event === 'sources') {
+          // 多轮检索跨轮合并：模型可能多轮 search_knowledge，只取最后一轮会丢掉
+          // 前几轮已评估通过的相关资料（同块保留最高分，按 RRF 分降序）
+          const byKey = new Map(sources.map((s) => [`${s.docId}:${s.chunkIndex}`, s]))
+          for (const s of data.sources) {
+            const k = `${s.docId}:${s.chunkIndex}`
+            if (!byKey.has(k) || byKey.get(k).score < s.score) byKey.set(k, s)
+          }
+          sources = [...byKey.values()].sort((a, b) => b.score - a.score)
+          send(event, { sources })
+          return
+        }
         send(event, data)
       }
       const usageAcc = [] // 各轮 usage 的累积器（graph.js 内 push）

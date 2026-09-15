@@ -10,7 +10,7 @@
 
 import { StateGraph, Annotation, START, END } from '@langchain/langgraph'
 import { embedOne } from '../rag/embedder.js'
-import { search } from '../rag/qdrant.js'
+import { hybridSearch } from '../rag/qdrant.js'
 import { chatStructured } from '../llm.js'
 import { config } from '../config.js'
 import { gradeMessages, rewriteMessages, GRADE_SCHEMA, REWRITE_SCHEMA } from './prompts.js'
@@ -26,7 +26,7 @@ const SearchState = Annotation.Root({
   feedback: Annotation({ reducer: (_, y) => y, default: () => '' }),  // 评估反馈（缺什么），喂给改写节点
 })
 
-// 检索：多查询并发 → 合并去重（同块保留最高分）→ 截断 topK
+// 检索：多查询并发 → 混合检索（稠密+稀疏 RRF）→ 合并去重（同块保留最高分）→ 截断 topK
 async function retrieveNode(state, cfg) {
   const c = cfg?.configurable ?? {}
   const topK = c.topK ?? 5 // 从主图 configurable 透传下来的检索条数
@@ -34,9 +34,14 @@ async function retrieveNode(state, cfg) {
     'input.value': JSON.stringify(state.queries),
   })
 
-  // 每个查询词独立向量化 + 检索，Promise.all 并发执行
+  // 每个查询词独立向量化 + 混合检索，Promise.all 并发执行
+  let mode = 'hybrid-rrf'
   const results = await Promise.all(
-    state.queries.map(async (q) => search(await embedOne(q), { limit: topK }))
+    state.queries.map(async (q) => {
+      const r = await hybridSearch({ text: q, vector: await embedOne(q), limit: topK })
+      if (r.mode === 'dense-fallback') mode = r.mode // 任一路退化则整体标记
+      return r.hits
+    })
   )
   // 合并去重：key = docId:chunkIndex 定位同一内容块；重复命中保留分数最高的一次
   const byChunk = new Map()
@@ -49,7 +54,7 @@ async function retrieveNode(state, cfg) {
   // 按分数降序取 topK
   const merged = [...byChunk.values()].sort((a, b) => b.score - a.score).slice(0, topK)
 
-  span.end(merged.map((h) => h.title))
+  span.end(merged.map((h) => h.title), { 'retrieval.mode': mode })
   // Observation 事件：向前端汇报检索合并结果
   c.emit?.('step', {
     phase: 'observation',

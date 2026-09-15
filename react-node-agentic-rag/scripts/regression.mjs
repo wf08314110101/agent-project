@@ -81,6 +81,14 @@ const cases = [
     },
   },
   {
+    name: '混合检索：关键词字面命中（CRAG）',
+    q: 'CRAG 是什么模式的检索？',
+    check: (r) => {
+      ok(r.sources.length > 0, '应命中来源')
+      ok(/CRAG|评估|改写/.test(r.answer), `答案应提及 CRAG/评估/改写，实际: ${r.answer.slice(0, 80)}`)
+    },
+  },
+  {
     name: '知识库命中：检索策略',
     q: '系统的检索策略是什么样的？',
     check: (r) => {

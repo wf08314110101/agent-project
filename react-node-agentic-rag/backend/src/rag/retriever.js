@@ -7,18 +7,17 @@
 // ============================================================================
 
 import { embedOne } from './embedder.js'
-import { search } from './qdrant.js'
-import { config } from '../config.js'
+import { hybridSearch } from './qdrant.js'
 
 /**
- * 检索：query 向量化 → Qdrant 相似度搜索 → 分数阈值粗过滤
+ * 检索：query 向量化 → Qdrant 混合检索（稠密语义 + 稀疏关键词 RRF 融合）
  * @param {string}  question - 自然语言问题
  * @param {number}  topK     - 检索条数（默认 5）
- * @returns {Promise<Array>} 过滤后的命中块（score >= retrieveMinScore）
+ * @returns {Promise<Array>} 命中块（阈值已在稠密路 prefetch 服务端应用；
+ *          融合分为排名分，不再二次过滤）
  */
 export async function retrieve(question, topK = 5) {
   const vector = await embedOne(question)
-  const hits = await search(vector, { limit: topK })
-  // 阈值来自 config.retrieveMinScore（默认 0.3）：低分块多为噪声，直接丢弃
-  return hits.filter((h) => h.score >= config.retrieveMinScore)
+  const { hits } = await hybridSearch({ text: question, vector, limit: topK })
+  return hits
 }

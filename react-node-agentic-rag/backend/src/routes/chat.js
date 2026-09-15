@@ -13,8 +13,9 @@
 import { randomUUID } from 'node:crypto'
 import { runAgent } from '../agent/graph.js'
 import { AGENT_SYSTEM } from '../agent/prompts.js'
+import { compressMemory, memoryFallback } from '../agent/memory.js'
 import { rootSpan, runInCtx, flushObs } from '../obs/otel.js'
-import { insertSession, getSession, insertMsg, listRecentMsgs } from '../store/sqlite.js'
+import { insertSession, getSession, insertMsg, getMemory, listAfterSeq } from '../store/sqlite.js'
 import { countPoints } from '../rag/qdrant.js'
 import { config } from '../config.js'
 
@@ -36,8 +37,6 @@ const sse = (reply) => {
   return (event, data) => reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
 }
 
-const HISTORY_KEEP = 20 // 多轮上下文窗口：最近 N 条
-
 export default async function (app) {
   // M2 Agentic RAG 流式问答
   // 事件协议：step* / sources / delta* / usage / done|error
@@ -56,13 +55,6 @@ export default async function (app) {
         session = { id }
       }
 
-      // 历史（只回放 user/assistant 文本）+ 当前问题
-      // meta 里的 sources/steps 不回放：那是一次性过程数据，混进上下文反而干扰模型
-      // 过滤下推到 SQL：只取最近 HISTORY_KEEP 条（配合 session_id 索引），内存 O(N)
-      const history = listRecentMsgs
-        .all(session.id, HISTORY_KEEP)
-        .map((m) => ({ role: m.role, content: m.content }))
-
       // 降级预判：知识库为空时注入直答提示，省掉无意义的检索轮
       // （countPoints 是一次 Qdrant 往返，Qdrant 抖动时不阻塞对话——失败按"非空"处理）
       let kbEmptyNote = null
@@ -73,14 +65,6 @@ export default async function (app) {
             : null
         } catch { } // Qdrant 抖动时不阻塞对话
       }
-
-      // 组装最终输入：系统提示 → （可选）空库提示 → 多轮历史 → 当前问题
-      const input = [
-        { role: 'system', content: AGENT_SYSTEM },
-        ...(kbEmptyNote ? [{ role: 'system', content: kbEmptyNote }] : []),
-        ...history,
-        { role: 'user', content: question },
-      ]
 
       const send = sse(reply)
       const abort = new AbortController()
@@ -109,6 +93,35 @@ export default async function (app) {
       }
       const usageAcc = [] // 各轮 usage 的累积器（graph.js 内 push）
       const startedAt = Date.now()
+
+      // 长会话记忆压缩：窗口外历史滚动为摘要（挂根 span；失败退化为仅回放窗口，不阻断对话）
+      let memoryNote = null
+      try {
+        memoryNote = await runInCtx(root, () =>
+          compressMemory({ sessionId: session.id, emit, usageAcc, signal: abort.signal })
+        )
+      } catch (e) {
+        req.log.warn(`[memory] 压缩失败，退化为窗口回放: ${e.message}`)
+        memoryNote = memoryFallback(session.id)
+      }
+
+      // 历史回放：压缩断点之后的所有消息（= 窗口 + 未压缩真空区，零丢失；
+      // meta 里的 sources/steps 不回放：一次性过程数据，混进上下文反而干扰模型）
+      const boundary = getMemory.get(session.id)?.summarized_seq ?? 0
+      const history = listAfterSeq
+        .all(session.id, boundary)
+        .map((m) => ({ role: m.role, content: m.content }))
+
+      // 组装最终输入：系统提示 → （可选）空库提示 → （可选）会话记忆摘要 → 断点后历史 → 当前问题
+      const input = [
+        { role: 'system', content: AGENT_SYSTEM },
+        ...(kbEmptyNote ? [{ role: 'system', content: kbEmptyNote }] : []),
+        ...(memoryNote
+          ? [{ role: 'system', content: `（早期对话记忆摘要，供参考）\n${memoryNote}` }]
+          : []),
+        ...history,
+        { role: 'user', content: question },
+      ]
 
       try {
         // 运行 Agent 主图（ReAct 循环）—— 在根 span 上下文内执行，子 span 自动挂树

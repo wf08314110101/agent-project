@@ -61,6 +61,11 @@ export const config = {
     searchMaxAttempts: int('SEARCH_MAX_ATTEMPTS', 2), // search_kb 子图最大"改写→重检"尝试次数
   },
 
+  // ---- 长会话记忆压缩 ----
+  memory: {
+    windowSize: int('MEMORY_WINDOW', 20), // 回放窗口：最近 N 条原文恒在上下文（+未压缩真空区，零丢失）
+  },
+
   // ---- Langfuse 观测（可选）：三项都配置才启用，用于 trace/generation 记录 ----
   langfuse: {
     host: env('LANGFUSE_HOST', ''),

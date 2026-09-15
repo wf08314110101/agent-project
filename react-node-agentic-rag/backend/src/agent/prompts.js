@@ -65,6 +65,25 @@ ${numbered || '（无）'}
 }
 
 /**
+ * 会话记忆压缩消息模板（memory.js 用）
+ * 增量式：旧摘要 + 新出窗消息 → 合并成一份更新后的完整记忆
+ * @param {string} prevSummary - 上一版摘要（首压为空串）
+ * @param {Array}  msgs        - 尚未压缩过的出窗消息 [{role, content}]
+ * @returns {Array} OpenAI 消息数组（纯文本输出，非结构化）
+ */
+export const memoryMessages = (prevSummary, msgs) => [
+  { role: 'system', content: '你是会话记忆压缩器，把早期对话整理成要点式记忆，供后续对话作为上下文。' },
+  {
+    role: 'user',
+    content: `${prevSummary ? `已有记忆:\n${prevSummary}\n\n` : ''}新出窗对话:\n${msgs
+      .map((m) => `${m.role === 'user' ? '用户' : '助手'}: ${m.content}`)
+      .join('\n')}
+
+输出更新后的完整记忆：要点列表，保留已确认的结论与关键数字、用户的偏好与纠正、未决事项；丢弃寒暄与过程细节。不超过 300 字，直接输出内容本身。`,
+  },
+]
+
+/**
  * 查询改写消息模板（rewrite 节点用）
  * 提供原问题 + 已尝试查询（避免重复）+ 不足原因（对症下药），让模型换角度改写以提升召回。
  * @param {string} question    - 原始问题

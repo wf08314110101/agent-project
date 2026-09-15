@@ -55,6 +55,10 @@ db.exec('CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(s
 // 老库列迁移（已存在则忽略）：早期版本没有 error/path 两列
 try { db.exec('ALTER TABLE documents ADD COLUMN error TEXT') } catch { }
 try { db.exec('ALTER TABLE documents ADD COLUMN path TEXT') } catch { }
+// M4 记忆压缩：会话级滚动摘要 + seq 水位断点（删除免疫：seq 单调不回移，数量断点在删消息场景会错位）
+try { db.exec('ALTER TABLE sessions ADD COLUMN summary TEXT NOT NULL DEFAULT \'\'') } catch { }
+try { db.exec('ALTER TABLE sessions ADD COLUMN summarized_seq INTEGER NOT NULL DEFAULT 0') } catch { }
+try { db.exec('ALTER TABLE sessions DROP COLUMN summarized_count') } catch { } // 旧数量断点，已被 seq 取代
 
 // ---- documents：摄取队列 + 文档管理 ----
 export const insertDoc = db.prepare(
@@ -88,7 +92,25 @@ export const insertMsg = db.prepare(
 export const listMsgs = db.prepare(
   'SELECT * FROM chat_messages WHERE session_id = ? ORDER BY seq ASC'
 )
-// 只取最近 N 条（DESC LIMIT 内层倒序取，外层正序还原），内存 O(N) 而非 O(全部)
-export const listRecentMsgs = db.prepare(
-  'SELECT * FROM (SELECT * FROM chat_messages WHERE session_id = ? ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC'
+// 记忆回放：取断点之后的所有消息（= 固定窗口 + 尚未压缩的真空区），零丢失且上界可控
+export const listAfterSeq = db.prepare(
+  'SELECT * FROM chat_messages WHERE session_id = ? AND seq > ? ORDER BY seq ASC'
+)
+// 窗口起点：最近 N 条里最早一条的 seq（压缩边界：断点之前的都要进摘要）
+export const windowStartSeq = db.prepare(
+  'SELECT MIN(seq) AS s FROM (SELECT seq FROM chat_messages WHERE session_id = ? ORDER BY seq DESC LIMIT ?)'
+)
+// 待压缩数：断点与窗口起点之间的消息条数（攒批判断依据）
+export const countPending = db.prepare(
+  'SELECT COUNT(*) AS n FROM chat_messages WHERE session_id = ? AND seq > ? AND seq <= ?'
+)
+// 取待压缩的早期消息（断点 → 窗口起点]，用于增量摘要
+export const listPending = db.prepare(
+  'SELECT * FROM chat_messages WHERE session_id = ? AND seq > ? AND seq <= ? ORDER BY seq ASC'
+)
+
+// ---- sessions：记忆压缩（滚动摘要，seq 水位断点）----
+export const getMemory = db.prepare('SELECT summary, summarized_seq FROM sessions WHERE id = ?')
+export const updateMemory = db.prepare(
+  'UPDATE sessions SET summary = ?, summarized_seq = ? WHERE id = ?'
 )

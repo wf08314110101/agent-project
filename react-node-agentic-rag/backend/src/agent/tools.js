@@ -7,6 +7,7 @@
 // ============================================================================
 
 import { searchGraph } from './search-graph.js'
+import { validateSchema } from '../schema.js'
 
 // 工具的 JSON Schema 描述：LLM 依据 description 和 parameters 决定何时调用、怎么传参
 export const toolDefs = [
@@ -60,37 +61,11 @@ function calc(expr) {
   }
 }
 
-// 迷你 JSON Schema 校验器：只覆盖 required + 基础类型（零依赖；schema 复用 toolDefs 单一事实源）
-function validateAgainstSchema(value, schema, path = '参数') {
-  const t = schema.type
-  if (t) {
-    const actual = Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value
-    const ok =
-      t === 'string' ? actual === 'string'
-        : t === 'number' ? actual === 'number'
-          : t === 'boolean' ? actual === 'boolean'
-            : t === 'object' ? actual === 'object' && !Array.isArray(value)
-              : t === 'array' ? actual === 'array'
-                : true
-    if (!ok) return `${path} 类型应为 ${t}，实际为 ${actual}`
-  }
-  for (const k of schema.required ?? []) {
-    if (value?.[k] === undefined) return `缺少必填字段 ${path}.${k}`
-  }
-  for (const [k, sub] of Object.entries(schema.properties ?? {})) {
-    if (value?.[k] !== undefined) {
-      const err = validateAgainstSchema(value[k], sub, `${path}.${k}`)
-      if (err) return err
-    }
-  }
-  return null
-}
-
 // 工具执行前的参数校验入口；未知工具返回 null（由 runTool 兜底提示可用工具）
 export function validateToolArgs(name, args) {
   const def = toolDefs.find((d) => d.function.name === name)
   if (!def) return null
-  return validateAgainstSchema(args, def.function.parameters ?? {})
+  return validateSchema(args, def.function.parameters ?? {})
 }
 
 /**

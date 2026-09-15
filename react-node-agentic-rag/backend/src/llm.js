@@ -1,13 +1,13 @@
 // ============================================================================
-// LLM 封装层：基于 OpenAI 兼容协议（默认 DeepSeek）的三种调用方式
+// LLM 封装层：基于 OpenAI 兼容协议（默认 DeepSeek）的两种调用方式
 // ----------------------------------------------------------------------------
-// chatStream  : 流式对话（支持工具绑定）→ Agent 主循环使用
-// chatJSON    : 非流式 JSON 模式 → 子图打分/改写等结构化小任务
-// parseJSON   : 容错解析模型输出的 JSON（剥掉 ```json 包裹）
+// chatStream     : 流式对话（支持工具绑定）→ Agent 主循环使用
+// chatStructured : 结构化输出（tool-call 强制 + schema 校验自纠）→ 子图打分/改写
 // ============================================================================
 
 import OpenAI from 'openai'
 import { config } from './config.js'
+import { validateSchema } from './schema.js'
 
 // OpenAI 兼容客户端（DeepSeek）：超时 + 有限重试，防止请求挂死
 export const llm = new OpenAI({
@@ -77,31 +77,48 @@ export async function chatStream(messages, { tools, toolChoice, signal, onDelta,
 }
 
 /**
- * 非流式 JSON 模式调用：用于打分/改写等结构化小任务
- * response_format: json_object 让模型强制输出合法 JSON， temperature=0 保证稳定
- * @returns {{ content: string, usage: object|null }}
+ * 结构化输出：tool-call 强制（OpenAI 兼容 API 支持面最广）+ 客户端 schema 校验 + 失败自纠一轮
+ *
+ * 为什么不用 response_format:
+ *   - json_object 只保证语法合法，形状不保证（弱一级）
+ *   - json_schema 强制最强但 DeepSeek 不支持（实测 400 unavailable）
+ *   - function-calling 由服务端约束 arguments 形状，强制力与兼容性平衡最优
+ *
+ * @param {object} schema - JSON Schema（子图打分/改写的返回形状，单一事实源在 prompts.js）
+ * @returns {{ args: object, usage: object|null }}
+ * @throws 两轮（原始+自纠）都未通过 schema 校验时抛错，调用方自行兜底
  */
-export async function chatJSON(messages, { signal } = {}) {
-  const res = await llm.chat.completions.create(
-    {
-      model: config.llm.model,
-      messages,
-      temperature: 0,
-      response_format: { type: 'json_object' },
-    },
-    { signal }
-  )
-  return { content: res.choices[0]?.message?.content ?? '', usage: res.usage ?? null }
-}
+export async function chatStructured(messages, schema, { name = 'submit_result', description = '提交结果', signal } = {}) {
+  const tool = { type: 'function', function: { name, description, parameters: schema } }
+  let msgs = messages
 
-/**
- * 容错 JSON 解析：模型偶发用 ```json ... ``` 代码块包裹，统一剥掉再解析
- * @returns {object|null} 解析失败返回 null（调用方自行兜底），绝不抛异常
- */
-export function parseJSON(text) {
-  try {
-    return JSON.parse(String(text).replace(/^```(json)?\s*|\s*```$/g, ''))
-  } catch {
-    return null
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const res = await llm.chat.completions.create(
+      {
+        model: config.llm.model,
+        messages: msgs,
+        temperature: 0,
+        tools: [tool],
+        tool_choice: { type: 'function', function: { name } }, // 钉死必须调用该工具
+      },
+      { signal }
+    )
+    const msg = res.choices[0]?.message
+    const call = msg?.tool_calls?.[0]
+    let args = null
+    try {
+      args = JSON.parse(call?.function?.arguments ?? '')
+    } catch { }
+
+    // 服务端强制 ≠ 零失败，客户端 schema 校验兜底
+    const invalid =
+      args === null || typeof args !== 'object'
+        ? '输出不是有效的 JSON 对象'
+        : validateSchema(args, schema)
+    if (!invalid) return { args, usage: res.usage ?? null }
+
+    if (attempt === 2) throw new Error(`结构化输出未通过 schema 校验: ${invalid}`)
+    // 自纠轮：把校验错误以 tool 消息回喂，强制重新提交（与工具参数校验同一回路）
+    msgs = [...msgs, msg, { role: 'tool', tool_call_id: call.id, content: `schema 校验失败: ${invalid}，请修正后重新提交` }]
   }
 }

@@ -11,9 +11,9 @@
 import { StateGraph, Annotation, START, END } from '@langchain/langgraph'
 import { embedOne } from '../rag/embedder.js'
 import { search } from '../rag/qdrant.js'
-import { chatJSON, parseJSON } from '../llm.js'
+import { chatStructured } from '../llm.js'
 import { config } from '../config.js'
-import { gradeMessages, rewriteMessages } from './prompts.js'
+import { gradeMessages, rewriteMessages, GRADE_SCHEMA, REWRITE_SCHEMA } from './prompts.js'
 import { otelSpan } from '../obs/phoenix.js'
 
 // 子图状态：attempt 记录已尝试次数，queries 是当前生效的查询词列表
@@ -59,29 +59,39 @@ async function retrieveNode(state, cfg) {
   return { hits: merged }
 }
 
-// 评估：LLM 逐条判相关 + 判断材料是否足够
+// 评估：LLM 逐条判相关 + 判断材料是否足够（返回形状由 GRADE_SCHEMA 经 tool-call 强制）
 async function gradeNode(state, cfg) {
   const c = cfg?.configurable ?? {}
   const lfGen = c.trace?.generation?.({ name: `相关性评估(第${state.attempts}次)`, input: state.queries })
   const span = otelSpan('search_kb.grade', 'LLM', { 'input.value': state.question })
 
-  // chatJSON：temperature=0 + json_object 模式，输出 {"relevant": [...], "enough": bool, "reason": str}
-  const { content, usage } = await chatJSON(gradeMessages(state.question, state.hits), { signal: c.signal })
-  const parsed = parseJSON(content)
-  lfGen?.end?.({ output: content, usage: usage && { promptTokens: usage.prompt_tokens, completionTokens: usage.completion_tokens, totalTokens: usage.total_tokens } })
-  span.end(content)
+  let grade = null
+  try {
+    const { args, usage } = await chatStructured(
+      gradeMessages(state.question, state.hits),
+      GRADE_SCHEMA,
+      { name: 'submit_grade', description: '提交相关性评估结果', signal: c.signal }
+    )
+    grade = args
+    lfGen?.end?.({ output: args, usage: usage && { promptTokens: usage.prompt_tokens, completionTokens: usage.completion_tokens, totalTokens: usage.total_tokens } })
+    span.end(args)
+  } catch (e) {
+    // 两轮自纠仍失败：评估器不可用，不阻断主链路 —— 全部保留，宁滥勿缺
+    lfGen?.end?.({ output: e.message, level: 'ERROR', statusMessage: e.message })
+    span.end(`评估失败: ${e.message}`)
+  }
 
   let hits = state.hits
   let enough = false
   let feedback = ''
-  if (parsed && Array.isArray(parsed.relevant)) {
+  if (grade && Array.isArray(grade.relevant)) {
     // 正常路径：仅保留 LLM 判定为相关的编号（编号从 1 开始，对应展示序号）
-    const keep = new Set(parsed.relevant.map(String))
+    const keep = new Set(grade.relevant.map(String))
     hits = state.hits.filter((_, i) => keep.has(String(i + 1)))
-    enough = parsed.enough === true
-    feedback = parsed.reason || ''
+    enough = grade.enough === true
+    feedback = grade.reason || ''
   } else {
-    hits = state.hits // JSON 解析失败兜底：全部保留
+    hits = state.hits // 评估失败兜底：全部保留
     enough = hits.length > 0 // 有结果就视为够用，避免误触发改写循环
   }
 
@@ -93,24 +103,34 @@ async function gradeNode(state, cfg) {
   return { hits, enough, feedback }
 }
 
-// 改写：材料不足时换 2 个问法重检
+// 改写：材料不足时换 2 个问法重检（返回形状由 REWRITE_SCHEMA 经 tool-call 强制）
 async function rewriteNode(state, cfg) {
   const c = cfg?.configurable ?? {}
   const lfGen = c.trace?.generation?.({ name: `查询改写(第${state.attempts}次)`, input: state.question })
   const span = otelSpan('search_kb.rewrite', 'LLM', { 'input.value': state.question })
 
   // 改写提示词包含：原问题 + 已尝试的查询（避免重复）+ 上一轮不足原因（对症改写）
-  const { content, usage } = await chatJSON(rewriteMessages(state.question, state.queries, state.feedback), { signal: c.signal })
-  const parsed = parseJSON(content)
-  lfGen?.end?.({ output: content, usage: usage && { promptTokens: usage.prompt_tokens, completionTokens: usage.completion_tokens, totalTokens: usage.total_tokens } })
-  span.end(content)
+  let queries = []
+  try {
+    const { args, usage } = await chatStructured(
+      rewriteMessages(state.question, state.queries, state.feedback),
+      REWRITE_SCHEMA,
+      { name: 'submit_rewrite', description: '提交改写后的检索查询', signal: c.signal }
+    )
+    queries = args.queries
+    lfGen?.end?.({ output: args, usage: usage && { promptTokens: usage.prompt_tokens, completionTokens: usage.completion_tokens, totalTokens: usage.total_tokens } })
+    span.end(args)
+  } catch (e) {
+    lfGen?.end?.({ output: e.message, level: 'ERROR', statusMessage: e.message })
+    span.end(`改写失败: ${e.message}`)
+  }
 
-  // 清洗改写结果：字符串化 → 滤空 → 最多取 2 个
-  const queries = (parsed?.queries ?? []).map(String).filter(Boolean).slice(0, 2)
-  const next = queries.length ? queries : [state.question] // 兜底：改写失败用原问题
-  c.emit?.('step', { phase: 'thought', label: '改写重检', content: next.join(' | ') })
+  // 清洗改写结果：字符串化 → 滤空 → 最多取 2 个；失败兜底用原问题
+  const next = (queries ?? []).map(String).filter(Boolean).slice(0, 2)
+  const finalQueries = next.length ? next : [state.question]
+  c.emit?.('step', { phase: 'thought', label: '改写重检', content: finalQueries.join(' | ') })
   // 返回新查询词并累加尝试次数；下一轮 retrieve 将使用新 queries
-  return { queries: next, attempts: state.attempts + 1 }
+  return { queries: finalQueries, attempts: state.attempts + 1 }
 }
 
 // 条件路由：材料不足且还有重试额度 → rewrite；否则结束

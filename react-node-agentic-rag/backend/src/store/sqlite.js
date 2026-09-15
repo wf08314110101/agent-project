@@ -49,9 +49,12 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 );
 `)
 
+// 历史查询按 session 过滤，无索引会全表扫
+db.exec('CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id)')
+
 // 老库列迁移（已存在则忽略）：早期版本没有 error/path 两列
-try { db.exec('ALTER TABLE documents ADD COLUMN error TEXT') } catch {}
-try { db.exec('ALTER TABLE documents ADD COLUMN path TEXT') } catch {}
+try { db.exec('ALTER TABLE documents ADD COLUMN error TEXT') } catch { }
+try { db.exec('ALTER TABLE documents ADD COLUMN path TEXT') } catch { }
 
 // ---- documents：摄取队列 + 文档管理 ----
 export const insertDoc = db.prepare(
@@ -84,4 +87,8 @@ export const insertMsg = db.prepare(
 // 按 seq 升序：保证多轮对话顺序正确（slice(-20) 取最近窗口）
 export const listMsgs = db.prepare(
   'SELECT * FROM chat_messages WHERE session_id = ? ORDER BY seq ASC'
+)
+// 只取最近 N 条（DESC LIMIT 内层倒序取，外层正序还原），内存 O(N) 而非 O(全部)
+export const listRecentMsgs = db.prepare(
+  'SELECT * FROM (SELECT * FROM chat_messages WHERE session_id = ? ORDER BY seq DESC LIMIT ?) ORDER BY seq ASC'
 )

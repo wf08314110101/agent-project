@@ -14,7 +14,7 @@ import { randomUUID } from 'node:crypto'
 import { runAgent } from '../agent/graph.js'
 import { AGENT_SYSTEM } from '../agent/prompts.js'
 import { startTrace, flushObs } from '../obs/langfuse.js'
-import { insertSession, getSession, insertMsg, listMsgs } from '../store/sqlite.js'
+import { insertSession, getSession, insertMsg, listRecentMsgs } from '../store/sqlite.js'
 import { countPoints } from '../rag/qdrant.js'
 import { config } from '../config.js'
 
@@ -58,10 +58,10 @@ export default async function (app) {
 
       // 历史（只回放 user/assistant 文本）+ 当前问题
       // meta 里的 sources/steps 不回放：那是一次性过程数据，混进上下文反而干扰模型
-      const history = listMsgs
-        .all(session.id)
+      // 过滤下推到 SQL：只取最近 HISTORY_KEEP 条（配合 session_id 索引），内存 O(N)
+      const history = listRecentMsgs
+        .all(session.id, HISTORY_KEEP)
         .map((m) => ({ role: m.role, content: m.content }))
-        .slice(-HISTORY_KEEP)
 
       // 降级预判：知识库为空时注入直答提示，省掉无意义的检索轮
       // （countPoints 是一次 Qdrant 往返，Qdrant 抖动时不阻塞对话——失败按"非空"处理）

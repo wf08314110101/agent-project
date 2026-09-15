@@ -12,7 +12,7 @@
 import { StateGraph, Annotation, START, END } from '@langchain/langgraph'
 import { chatStream } from '../llm.js'
 import { config } from '../config.js'
-import { toolDefs, runTool } from './tools.js'
+import { toolDefs, runTool, validateToolArgs } from './tools.js'
 import { FORCE_ANSWER } from './prompts.js'
 import { otelSpan } from '../obs/phoenix.js'
 
@@ -93,6 +93,15 @@ async function toolsNode(state, cfg) {
     try {
       args = JSON.parse(tc.function.arguments || '{}')
     } catch { }
+
+    // LLM 输出不可信：参数先过 schema 校验，失败以 Observation 回喂自纠，不执行
+    const invalid = validateToolArgs(tc.function.name, args)
+    if (invalid) {
+      const obs = `参数校验失败: ${invalid}。请按工具定义修正参数后重试。`
+      c.emit?.('step', { phase: 'observation', label: tc.function.name, content: obs })
+      newMsgs.push({ role: 'tool', tool_call_id: tc.id, content: obs })
+      continue
+    }
 
     // Action 事件：告知前端模型决定调用什么工具
     c.emit?.('step', { phase: 'action', label: tc.function.name, content: tc.function.arguments })

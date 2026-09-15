@@ -78,47 +78,19 @@ const stableKey = (v) =>
   )
 
 // Action + Observation：执行工具，结果以 role:tool 回填上下文
+// 同批 tool_calls 并发执行（Promise.all）：单工具场景零变化，多工具时延迟 ≈ 最慢一个
+// 复用提示：跨轮（actionLog 命中）或同批（inflight 命中）的重复调用都直接复用结果并附自纠提示
+const REUSE_HINT = '\n\n（系统提示：该调用此前已执行且参数完全相同，结果不会变化。请勿重复调用——请基于已有结果继续回答，或换一种问法/工具。）'
+
 async function toolsNode(state, cfg) {
   const c = cfg?.configurable ?? {}
   const last = state.messages[state.messages.length - 1]
-  const newMsgs = []
+  // 同批内 cacheKey → 执行 Promise：相同调用只执行一次，重复者 await 同一结果
+  const inflight = new Map()
 
-  // 可能一次请求携带多个 tool_calls，逐个执行
-  for (const tc of last.tool_calls) {
-    // 解析工具参数：模型输出的 arguments 是 JSON 字符串，解析失败按空参数处理
-    let args = {}
-    try {
-      args = JSON.parse(tc.function.arguments || '{}')
-    } catch { }
-
-    // LLM 输出不可信：参数先过 schema 校验，失败以 Observation 回喂自纠，不执行
-    const invalid = validateToolArgs(tc.function.name, args)
-    if (invalid) {
-      const obs = `参数校验失败: ${invalid}。请按工具定义修正参数后重试。`
-      c.emit?.('step', { phase: 'observation', label: tc.function.name, content: obs })
-      newMsgs.push({ role: 'tool', tool_call_id: tc.id, content: obs })
-      continue
-    }
-
-    // Action 事件：告知前端模型决定调用什么工具
-    c.emit?.('step', { phase: 'action', label: tc.function.name, content: tc.function.arguments })
-
-    // 重复 Action 检测：完全相同的调用（含同批内重复）直接复用上次结果
-    const cacheKey = `${tc.function.name}:${stableKey(args)}`
-    if (c.actionLog?.has(cacheKey)) {
-      const obs = `${c.actionLog.get(cacheKey)}\n\n（系统提示：该调用此前已执行且参数完全相同，结果不会变化。请勿重复调用——请基于已有结果继续回答，或换一种问法/工具。）`
-      c.emit?.('step', {
-        phase: 'observation',
-        label: tc.function.name,
-        content: '检测到重复 Action，复用上次结果（未重新执行）',
-      })
-      newMsgs.push({ role: 'tool', tool_call_id: tc.id, content: obs })
-      continue
-    }
-
+  /** 实际执行单个工具（含 span/usage/缓存），异常已内化为 Observation 字符串，永不 reject */
+  const execOne = async (tc, args, cacheKey) => {
     const span = otelSpan(`tool.${tc.function.name}`, 'TOOL', { 'input.value': tc.function.arguments })
-
-    // 执行工具：任何异常都转成 Observation 字符串回喂模型，让模型自我修正而不是整轮失败
     let obs
     try {
       obs = await runTool(tc.function.name, args, cfg)
@@ -129,17 +101,66 @@ async function toolsNode(state, cfg) {
     }
     // 成功/失败都入缓存：同参重试注定同结果，失败应换问法而非原样重试
     c.actionLog?.set(cacheKey, obs)
-
     // Observation 事件：截断展示给前端（完整内容仍在上下文里）
     c.emit?.('step', {
       phase: 'observation',
       label: tc.function.name,
       content: String(obs).length > 200 ? String(obs).slice(0, 200) + '…' : String(obs),
     })
-    // OpenAI 规范：工具结果必须以 role:'tool' + tool_call_id 回填
-    newMsgs.push({ role: 'tool', tool_call_id: tc.id, content: obs })
+    return obs
   }
-  return { messages: newMsgs }
+
+  // 并发执行每个 tool_call；结果按 tool_calls 原下标回填（完成顺序不影响消息顺序）
+  const results = await Promise.all(
+    last.tool_calls.map(async (tc) => {
+      // 解析工具参数：模型输出的 arguments 是 JSON 字符串，解析失败按空参数处理
+      let args = {}
+      try {
+        args = JSON.parse(tc.function.arguments || '{}')
+      } catch { }
+
+      // LLM 输出不可信：参数先过 schema 校验，失败以 Observation 回喂自纠，不执行
+      const invalid = validateToolArgs(tc.function.name, args)
+      if (invalid) {
+        const obs = `参数校验失败: ${invalid}。请按工具定义修正参数后重试。`
+        c.emit?.('step', { phase: 'observation', label: tc.function.name, content: obs })
+        return obs
+      }
+
+      // Action 事件：告知前端模型决定调用什么工具
+      c.emit?.('step', { phase: 'action', label: tc.function.name, content: tc.function.arguments })
+
+      // 重复 Action 检测（跨轮）：完全相同的调用直接复用上次结果
+      const cacheKey = `${tc.function.name}:${stableKey(args)}`
+      if (c.actionLog?.has(cacheKey)) {
+        c.emit?.('step', {
+          phase: 'observation',
+          label: tc.function.name,
+          content: '检测到重复 Action，复用上次结果（未重新执行）',
+        })
+        return c.actionLog.get(cacheKey) + REUSE_HINT
+      }
+
+      // 同批去重：相同调用共享同一个执行 Promise，先到先执行、后到复用
+      if (inflight.has(cacheKey)) {
+        const obs = await inflight.get(cacheKey)
+        c.emit?.('step', {
+          phase: 'observation',
+          label: tc.function.name,
+          content: '检测到重复 Action，复用本次批次结果（未重复执行）',
+        })
+        return obs + REUSE_HINT
+      }
+      const p = execOne(tc, args, cacheKey)
+      inflight.set(cacheKey, p)
+      return p
+    })
+  )
+
+  // OpenAI 规范：工具结果必须以 role:'tool' + tool_call_id 回填（与 tool_calls 一一对应）
+  return {
+    messages: last.tool_calls.map((tc, i) => ({ role: 'tool', tool_call_id: tc.id, content: results[i] })),
+  }
 }
 
 // ---- 编译状态图：节点 + 边（条件边由 route 决定走向）----

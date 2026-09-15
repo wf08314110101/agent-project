@@ -9,6 +9,7 @@
 // ============================================================================
 
 import { StateGraph, Annotation, START, END } from '@langchain/langgraph'
+import { createHash } from 'node:crypto'
 import { embedOne } from '../rag/embedder.js'
 import { hybridSearch } from '../rag/qdrant.js'
 import { chatStructured } from '../llm.js'
@@ -64,23 +65,43 @@ async function retrieveNode(state, cfg) {
   return { hits: merged }
 }
 
+// ---- 评估结果缓存 ----
+// 键 = 问题 + 有序块文本哈希（内容寻址）：增删文档会改变块集 → 键不同，天然免疫脏读；
+// 命中即等价重放评估结论（省一次 LLM 评估），收益场景：同一问题跨请求重复评估
+const gradeCache = new Map()
+const GRADE_CACHE_MAX = 500 // FIFO 上限，重启即空（纯优化层，不影响正确性）
+const gradeCacheKey = (question, hits) =>
+  createHash('sha1')
+    .update(
+      question.trim().toLowerCase() +
+        '\n' +
+        hits.map((h) => createHash('sha1').update(h.text).digest('hex')).join(',')
+    )
+    .digest('hex')
+
 // 评估：LLM 逐条判相关 + 判断材料是否足够（返回形状由 GRADE_SCHEMA 经 tool-call 强制）
 async function gradeNode(state, cfg) {
   const c = cfg?.configurable ?? {}
+  const cacheKey = gradeCacheKey(state.question, state.hits)
   const span = otelSpan('search_kb.grade', 'LLM', { 'input.value': state.question })
 
-  let grade = null
-  try {
-    const { args, usage } = await chatStructured(
-      gradeMessages(state.question, state.hits),
-      GRADE_SCHEMA,
-      { name: 'submit_grade', description: '提交相关性评估结果', signal: c.signal }
-    )
-    grade = args
-    span.end(args, { usage })
-  } catch (e) {
-    // 两轮自纠仍失败：评估器不可用，不阻断主链路 —— 全部保留，宁滥勿缺
-    span.end(`评估失败: ${e.message}`, { level: 'ERROR', statusMessage: e.message })
+  let grade = gradeCache.get(cacheKey)
+  const cached = !!grade
+  if (cached) {
+    span.end('评估缓存命中', { 'cache.hit': true })
+  } else {
+    try {
+      const { args, usage } = await chatStructured(
+        gradeMessages(state.question, state.hits),
+        GRADE_SCHEMA,
+        { name: 'submit_grade', description: '提交相关性评估结果', signal: c.signal }
+      )
+      grade = args
+      span.end(args, { usage })
+    } catch (e) {
+      // 两轮自纠仍失败：评估器不可用，不阻断主链路 —— 全部保留，宁滥勿缺
+      span.end(`评估失败: ${e.message}`, { level: 'ERROR', statusMessage: e.message })
+    }
   }
 
   let hits = state.hits
@@ -97,10 +118,18 @@ async function gradeNode(state, cfg) {
     enough = hits.length > 0 // 有结果就视为够用，避免误触发改写循环
   }
 
+  // 缓存写入：仅真实评估结果入缓存（缓存命中回放不重复写）
+  if (grade && Array.isArray(grade.relevant) && !cached) {
+    gradeCache.set(cacheKey, grade)
+    if (gradeCache.size > GRADE_CACHE_MAX) {
+      gradeCache.delete(gradeCache.keys().next().value) // FIFO 淘汰
+    }
+  }
+
   c.emit?.('step', {
     phase: 'observation',
     label: '评估',
-    content: `${enough ? '✅ 材料充足' : '⚠️ 材料不足'}：保留 ${hits.length}/${state.hits.length}${feedback ? `（${feedback}）` : ''}`,
+    content: `${cached ? '⚡ 评估（缓存命中）' : enough ? '✅ 材料充足' : '⚠️ 材料不足'}：保留 ${hits.length}/${state.hits.length}${feedback ? `（${feedback}）` : ''}`,
   })
   return { hits, enough, feedback }
 }

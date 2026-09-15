@@ -13,16 +13,17 @@ React 5174 ──SSE── Fastify 8788 ──┬── DeepSeek (LLM, 工具调
                                    │      └─ search_kb 子图: retrieve → grade → rewrite
                                    ├── Qdrant 6333 (向量) ←─ 本地嵌入 bge-small-zh (ONNX)
                                    └── SQLite (文档/会话/消息)
-观测: Langfuse 云端 trace ｜ Phoenix OTel (PHOENIX_ENABLED=true)
+观测: OTel 单管道双导出 → Langfuse 云端 ｜ Phoenix (PHOENIX_ENABLED=true)
 ```
 
 ## 功能
 
 - **摄取队列**：上传即 202 入队，worker 后台解析→切块→嵌入，状态轮询；同内容 hash 去重；宕机自恢复
-- **Agentic 检索**：多查询并发检索 + LLM 逐条相关性评估 + 材料不足自动改写重检（CRAG，有界 2 次）
-- **工具调用**：search_knowledge / calculator / get_current_time；超 6 轮强制直答防死循环
-- **会话**：多轮上下文、消息+步骤+来源持久化回放、会话增删
-- **可观测**：Langfuse trace/generation/span + usage；Phoenix OTel（OpenInference 规范）
+- **混合检索**：稠密（bge 语义）+ 稀疏（jieba 分词 BM25）双路 Qdrant 服务端 RRF 融合，关键词/专名查询不丢召回
+- **Agentic 检索**：多查询并发检索 + LLM 逐条相关性评估（结果缓存）+ 材料不足自动改写重检（CRAG，有界 2 次）
+- **工具调用**：search_knowledge / calculator / get_current_time；参数 schema 校验门、同参重复调用检测、同批多工具并行执行；超 6 轮强制直答防死循环
+- **会话**：多轮上下文（超窗滚动摘要压缩，seq 断点零丢失）、消息+步骤+来源持久化回放、会话增删
+- **可观测**：单一 OTel 管道双导出——Langfuse trace/span/usage + Phoenix OpenInference，一次埋点两平台同构
 - **生产防线**：限流（全局 120/min、chat 20/min）、知识库为空降级直答、坏用例回归脚本、容器化部署
 
 ## 快速开始
@@ -49,10 +50,11 @@ docker compose up -d backend frontend
 | `QDRANT_URL` / `QDRANT_COLLECTION` | localhost:6333 / agentic_docs | 向量库 |
 | `EMBED_MODEL` / `EMBED_DIM` | Xenova/bge-small-zh-v1.5 / 512 | 本地嵌入 |
 | `HF_ENDPOINT` | hf-mirror.com | 模型下载镜像（国内） |
-| `RETRIEVE_MIN_SCORE` | 0.3 | 相似度阈值 |
+| `RETRIEVE_MIN_SCORE` | 0.3 | 稠密路相似度阈值（RRF 融合分不再二次过滤） |
 | `AGENT_MAX_ITERATIONS` / `SEARCH_MAX_ATTEMPTS` | 6 / 2 | 主图轮数上限 / 检索重试上限 |
 | `RATE_LIMIT_MAX` / `CHAT_RATE_LIMIT_MAX` | 120 / 20 | 每分钟限流 |
 | `FALLBACK_DIRECT` | true | 知识库为空时通用知识直答（注明） |
+| `MEMORY_WINDOW` | 20 | 会话窗口条数（更早消息滚动摘要压缩） |
 | `LANGFUSE_*` | - | 配置即启用，不配为空壳 |
 | `PHOENIX_ENABLED` / `PHOENIX_ENDPOINT` | false | OTel → Phoenix |
 
@@ -72,7 +74,7 @@ docker compose up -d backend frontend
 ## 回归测试
 
 ```bash
-node scripts/regression.mjs          # 需先起服务；自举 fixture，5 类坏用例断言，失败退出码 1
+node scripts/regression.mjs          # 需先起服务；自举 fixture，6 类坏用例断言，失败退出码 1
 BASE_URL=http://localhost:8080 node scripts/regression.mjs   # 打容器栈
 ```
 
@@ -83,13 +85,14 @@ BASE_URL=http://localhost:8080 node scripts/regression.mjs   # 打容器栈
 3. node:24-slim 中 better-sqlite3 回退 node-gyp：Dockerfile 需 `python3 make g++`
 4. nginx 反代 SSE 必须 `proxy_buffering off`，否则流式变一次性输出
 5. SSE 误判断开：POST 体读完 `req.raw` 也会 close，需 `writableEnded` 守卫
+6. `@node-rs/jieba` 必须显式 `Jieba.withDict` 加载词典，否则中文全切成单字，BM25 稀疏向量失效
 
 ## 目录
 
 ```
-backend/src/  server·config·llm ｜ routes/(chat·documents·sessions·health)
-              rag/(parser·chunker·embedder·qdrant·ingest) ｜ agent/(graph·search-graph·tools·prompts)
-              store/sqlite ｜ obs/(langfuse·phoenix)
+backend/src/  server·config·llm·schema ｜ routes/(chat·documents·sessions·health)
+              rag/(parser·chunker·embedder·tokenizer·qdrant·ingest)
+              agent/(graph·search-graph·tools·prompts·memory) ｜ store/sqlite ｜ obs/otel
 frontend/src/ App ｜ components/(ChatTab·DocsTab) ｜ api(SSE 解析)
 scripts/      regression.mjs
 docs/         功能演进时间线.md

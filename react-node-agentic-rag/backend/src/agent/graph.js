@@ -67,6 +67,16 @@ function route(state) {
   return END
 }
 
+// 重复 Action 检测：同参同工具的调用结果必然一致，复用缓存 Observation，
+// 不再执行工具（检索/LLM 调用都省掉），并注入提示引导模型换问法或直接作答。
+// key 需要键序稳定：JSON.stringify 的递归 sort 保证 {a,b} 与 {b,a} 生成同一 key
+const stableKey = (v) =>
+  JSON.stringify(v, (_, x) =>
+    x && typeof x === 'object' && !Array.isArray(x)
+      ? Object.fromEntries(Object.entries(x).sort())
+      : x
+  )
+
 // Action + Observation：执行工具，结果以 role:tool 回填上下文
 async function toolsNode(state, cfg) {
   const c = cfg?.configurable ?? {}
@@ -93,6 +103,19 @@ async function toolsNode(state, cfg) {
     // Action 事件：告知前端模型决定调用什么工具
     c.emit?.('step', { phase: 'action', label: tc.function.name, content: tc.function.arguments })
 
+    // 重复 Action 检测：完全相同的调用（含同批内重复）直接复用上次结果
+    const cacheKey = `${tc.function.name}:${stableKey(args)}`
+    if (c.actionLog?.has(cacheKey)) {
+      const obs = `${c.actionLog.get(cacheKey)}\n\n（系统提示：该调用此前已执行且参数完全相同，结果不会变化。请勿重复调用——请基于已有结果继续回答，或换一种问法/工具。）`
+      c.emit?.('step', {
+        phase: 'observation',
+        label: tc.function.name,
+        content: '检测到重复 Action，复用上次结果（未重新执行）',
+      })
+      newMsgs.push({ role: 'tool', tool_call_id: tc.id, content: obs })
+      continue
+    }
+
     const span = otelSpan(`tool.${tc.function.name}`, 'TOOL', { 'input.value': tc.function.arguments })
 
     // 执行工具：任何异常都转成 Observation 字符串回喂模型，让模型自我修正而不是整轮失败
@@ -104,6 +127,8 @@ async function toolsNode(state, cfg) {
       obs = `工具出错: ${e.message}`
       span.end(obs, { level: 'ERROR', statusMessage: e.message })
     }
+    // 成功/失败都入缓存：同参重试注定同结果，失败应换问法而非原样重试
+    c.actionLog?.set(cacheKey, obs)
 
     // Observation 事件：截断展示给前端（完整内容仍在上下文里）
     c.emit?.('step', {
@@ -143,6 +168,7 @@ export function runAgent({ messages, topK = 5, signal, emit, usageAcc }) {
         signal,
         usageAcc,
         topK,
+        actionLog: new Map(), // 重复 Action 检测缓存（每次 invoke 独立，跨请求不共享）
       },
     }
   )

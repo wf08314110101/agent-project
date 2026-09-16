@@ -25,7 +25,9 @@ export const config = {
   // ---- 存储层 ----
   qdrantUrl: env('QDRANT_URL', 'http://localhost:6333'),      // Qdrant 向量数据库 REST 地址
   qdrantCollection: env('QDRANT_COLLECTION', 'agentic_docs'), // 向量集合名（一个知识库一个集合）
-  sqlitePath: env('SQLITE_PATH', './data/app.db'),            // SQLite 文件路径（文档元数据/会话/消息）
+  pg: {
+    url: env('DATABASE_URL', 'postgres://rag:rag123@localhost:5432/rag'), // Postgres 连接串（文档元数据/会话/消息）
+  },
   uploadsDir: env('UPLOADS_DIR', './data/uploads'),           // 摄取队列暂存原件（worker 处理完即删）
 
   // ---- 限流（每分钟）：全局 + chat 单独收紧 ----

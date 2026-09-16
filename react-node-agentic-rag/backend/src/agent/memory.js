@@ -10,7 +10,7 @@
 // 增量压缩：旧摘要 + 新出窗 → 新摘要；断点推进到 ws；失败退化为仅回放窗口。
 // ============================================================================
 
-import { windowStartSeq, countPending, listPending, getMemory, updateMemory } from '../store/sqlite.js'
+import { windowStartSeq, countPending, listPending, getMemory, updateMemory } from '../store/pg.js'
 import { chatStream } from '../llm.js'
 import { config } from '../config.js'
 import { memoryMessages } from './prompts.js'
@@ -28,16 +28,16 @@ const COMPRESS_BATCH = 10 // 每攒够多少条出窗消息触发一次增量压
  */
 export async function compressMemory({ sessionId, emit, usageAcc, signal }) {
   const { windowSize } = config.memory
-  const ws = windowStartSeq.get(sessionId, windowSize).s
+  const ws = (await windowStartSeq(sessionId, windowSize)).s
   if (!ws) return null // 不足一窗，无需压缩
 
-  const mem = getMemory.get(sessionId) ?? { summary: '', summarized_seq: 0 }
-  const pending = countPending.get(sessionId, mem.summarized_seq ?? 0, ws).n
+  const mem = (await getMemory(sessionId)) ?? { summary: '', summarized_seq: 0 }
+  const pending = (await countPending(sessionId, mem.summarized_seq ?? 0, ws)).n
   if (pending < COMPRESS_BATCH) return mem.summary || null // 攒批：不够 10 条先复用旧摘要
 
   const span = otelSpan('memory.compress', 'CHAIN', { 'input.value': `旧摘要${mem.summary ? 1 : 0} + 出窗${pending}条` })
   // 取未压缩的出窗消息（断点 → 窗口起点]，连同旧摘要一起送 LLM 增量压缩
-  const olds = listPending.all(sessionId, mem.summarized_seq ?? 0, ws)
+  const olds = await listPending(sessionId, mem.summarized_seq ?? 0, ws)
   const { message, usage } = await chatStream(memoryMessages(mem.summary ?? '', olds), { signal })
   usageAcc?.push(usage)
   const summary = (message.content ?? '').trim()
@@ -45,7 +45,7 @@ export async function compressMemory({ sessionId, emit, usageAcc, signal }) {
   span.end(summary.slice(0, 500), { usage })
 
   // 断点推进到窗口起点：ws 之前的消息全部视为已压缩（seq 水位，删除不回移）
-  updateMemory.run(summary, ws, sessionId)
+  await updateMemory(summary, ws, sessionId)
   emit?.('step', {
     phase: 'thought',
     label: '历史压缩',
@@ -55,9 +55,9 @@ export async function compressMemory({ sessionId, emit, usageAcc, signal }) {
 }
 
 /** 压缩失败的兜底：返回旧摘要（可能为 null），保证对话不因记忆系统故障而中断 */
-export const memoryFallback = (sessionId) => {
+export const memoryFallback = async (sessionId) => {
   try {
-    return getMemory.get(sessionId)?.summary || null
+    return (await getMemory(sessionId))?.summary || null
   } catch {
     return null
   }

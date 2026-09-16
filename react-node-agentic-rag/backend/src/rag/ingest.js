@@ -19,7 +19,7 @@ import {
   resetProcessing,
   deleteDocRow,
   getUserById,
-} from '../store/sqlite.js'
+} from '../store/pg.js'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -53,7 +53,7 @@ export function createIngestWorker(log) {
    * 任何一步失败都会把文档标记为 failed(error)，不中断 worker。
    */
   async function processDoc(doc) {
-    setDocStatus.run('processing', null, doc.id) // 先占坑，防止重复消费
+    await setDocStatus('processing', null, doc.id) // 先占坑，防止重复消费
     // 进度上报：解析前 5%，解析完 15%，按嵌入批次推进到 90%，入库后 100%
     const report = (status, progress, extra = {}) =>
       ingestBus.emit('doc', { id: doc.id, filename: doc.filename, user_id: doc.user_id, status, progress, ...extra })
@@ -76,7 +76,7 @@ export function createIngestWorker(log) {
       }
       await ensureCollection() // 幂等：集合不存在则创建
       // M10 RBAC：密级随块写入 payload（召回前服务端过滤的依据）；ownerDept 从 users 表实时取
-      const owner = getUserById.get(doc.user_id)
+      const owner = await getUserById(doc.user_id)
       const n = await indexChunks({
         docId: doc.id,
         filename: doc.filename,
@@ -85,14 +85,14 @@ export function createIngestWorker(log) {
         acl: { ownerId: doc.user_id, classification: doc.classification ?? 'public', ownerDept: owner?.dept ?? '' },
       })
 
-      setDocChunks.run(n, doc.id)
-      setDocStatus.run('ready', null, doc.id)
+      await setDocChunks(n, doc.id)
+      await setDocStatus('ready', null, doc.id)
       await fs.rm(doc.path, { force: true }) // 原件用完即删（省磁盘）
       report('ready', 100, { chunks: n })
       log?.info?.(`[ingest] ${doc.filename} → ready（${n} 块）`)
     } catch (e) {
       // 失败落库：状态 + 错误信息都记录，前端可见原因
-      setDocStatus.run('failed', e.message, doc.id)
+      await setDocStatus('failed', e.message, doc.id)
       report('failed', 0, { error: e.message })
       log?.error?.(`[ingest] ${doc.filename} 失败: ${e.message}`)
     }
@@ -101,7 +101,7 @@ export function createIngestWorker(log) {
   // 主循环：有任务就处理，没任务就等待唤醒；alive=false 退出
   async function loop() {
     while (alive) {
-      const doc = nextPendingDoc.get()
+      const doc = await nextPendingDoc()
       if (!doc) {
         await waitForWork()
         continue
@@ -112,8 +112,8 @@ export function createIngestWorker(log) {
 
   return {
     /** 启动 worker：先把卡在 processing 的文档重置回 pending（宕机恢复），再进入循环 */
-    start() {
-      resetProcessing.run() // 宕机恢复
+    async start() {
+      await resetProcessing() // 宕机恢复
       alive = true
       loop()
       log?.info?.('[ingest] worker 已启动')
@@ -127,7 +127,7 @@ export function createIngestWorker(log) {
     },
     // 删除失败文档的残留行（前端可点清理）
     async purgeFailed(id) {
-      deleteDocRow.run(id)
+      await deleteDocRow(id)
     },
   }
 }

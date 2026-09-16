@@ -14,7 +14,7 @@ import { createIngestWorker, ingestBus } from '../rag/ingest.js'
 import {
   insertDoc, listDocsVisible, listDocsAll, updateDocMeta, getDoc, getDocByHash, deleteDocRow,
   deleteGrantsByDoc, listGrantsByDoc, grantDoc, revokeGrant, getUserByName, getUserById,
-} from '../store/sqlite.js'
+} from '../store/pg.js'
 import { deleteDocPoints, setDocAclPayload } from '../rag/qdrant.js'
 import { CLASSIFICATIONS, sanitizeTags } from '../acl.js'
 import { config } from '../config.js'
@@ -43,7 +43,7 @@ export default async function (app) {
       // 归属语义：hash 全库唯一（知识库是共享池，同一内容只嵌一份向量）；
       // 本人重复上传 → duplicated 跳过；他人已传 → 409 提示，不重复占存储
       const hash = hashBuffer(buf)
-      const dup = getDocByHash.get(hash)
+      const dup = await getDocByHash(hash)
       if (dup) {
         if (dup.user_id === req.user.sub) return reply.send({ duplicated: true, doc: dup })
         return reply.code(409).send({ error: '相同内容的文档已存在（由其他用户上传）' })
@@ -56,7 +56,7 @@ export default async function (app) {
       await fs.writeFile(filePath, buf)
 
       // 元数据入队：status=pending，挂当前用户归属，worker 会 wake 起来消费
-      insertDoc.run(docId, file.filename, buf.length, hash, 0, 'pending', null, filePath, req.user.sub, classification, JSON.stringify(tags))
+      await insertDoc(docId, file.filename, buf.length, hash, 0, 'pending', null, filePath, req.user.sub, classification, tags)
       worker.wake()
 
       // 202 Accepted：任务已受理，尚未完成
@@ -74,13 +74,16 @@ export default async function (app) {
   })
 
   // 文档列表：可见集合 = 本人 ∪ public ∪ 同部门(dept) ∪ 被授权；admin 全量（按创建时间倒序）
-  app.get('/api/documents', (req) =>
-    req.user.role === 'admin' ? listDocsAll.all() : listDocsVisible.all(req.user.sub, req.user.dept, req.user.dept, req.user.sub)
+  app.get('/api/documents', async (req) =>
+    req.user.role === 'admin' ? listDocsAll() : listDocsVisible(req.user.sub, req.user.dept)
   )
 
   // 摄取进度 SSE：连接即推一帧全量快照（docs 事件），之后订阅 worker 的 doc 事件实时推送
   // 快照与列表接口同口径（可见集合）；doc 事件仅推本人文档（admin 额外收全部），他人文档变化靠刷新列表
-  app.get('/api/documents/events', (req, reply) => {
+  app.get('/api/documents/events', async (req, reply) => {
+    const snapshot = () =>
+      req.user.role === 'admin' ? listDocsAll() : listDocsVisible(req.user.sub, req.user.dept)
+
     reply.raw.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
       'cache-control': 'no-cache',
@@ -88,9 +91,7 @@ export default async function (app) {
       'x-accel-buffering': 'no',
     })
     const send = (event, data) => reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
-    send('docs', {
-      docs: req.user.role === 'admin' ? listDocsAll.all() : listDocsVisible.all(req.user.sub, req.user.dept, req.user.dept, req.user.sub),
-    })
+    send('docs', { docs: await snapshot() })
 
     const onDoc = (d) => {
       if (d.user_id !== req.user.sub && req.user.role !== 'admin') return // 只推本人文档
@@ -106,7 +107,7 @@ export default async function (app) {
 
   // 密级/标签/授权变更（M10）：仅 owner 或 admin；ready 文档同步刷 Qdrant payload 即时生效
   app.patch('/api/documents/:id', async (req, reply) => {
-    const doc = getDoc.get(req.params.id)
+    const doc = await getDoc(req.params.id)
     if (!doc || (doc.user_id !== req.user.sub && req.user.role !== 'admin')) {
       return reply.code(404).send({ error: '文档不存在' })
     }
@@ -117,22 +118,22 @@ export default async function (app) {
       if (!Array.isArray(grants)) return reply.code(400).send({ error: 'grants 必须是用户名数组' })
       const ids = []
       for (const name of grants) {
-        const u = getUserByName.get(String(name))
+        const u = await getUserByName(String(name))
         if (!u) return reply.code(400).send({ error: `用户不存在: ${name}` })
         if (u.id !== doc.user_id) ids.push(u.id) // owner 无需授权
       }
-      const cur = new Set(listGrantsByDoc.all(doc.id).map((g) => g.user_id))
+      const cur = new Set((await listGrantsByDoc(doc.id)).map((g) => g.user_id))
       const next = new Set(ids)
-      for (const uid of next) if (!cur.has(uid)) grantDoc.run(doc.id, uid)
-      for (const uid of cur) if (!next.has(uid)) revokeGrant.run(doc.id, uid)
+      for (const uid of next) if (!cur.has(uid)) await grantDoc(doc.id, uid)
+      for (const uid of cur) if (!next.has(uid)) await revokeGrant(doc.id, uid)
     }
 
     // 密级/标签变更：受控枚举校验；同步 Qdrant payload，检索即时生效（无需重摄）
     const nextCls = classification ?? doc.classification
     if (!CLASSIFICATIONS.includes(nextCls)) return reply.code(400).send({ error: `密级必须是 ${CLASSIFICATIONS.join('/')}` })
-    const nextTags = tags === undefined ? doc.tags : JSON.stringify(sanitizeTags(tags))
-    updateDocMeta.run(nextCls, nextTags, doc.id)
-    const owner = getUserById.get(doc.user_id) // ownerDept 实时值（部门改码后无需重摄）
+    const nextTags = tags === undefined ? doc.tags : sanitizeTags(tags) // JSONB：数组直存直读
+    await updateDocMeta(nextCls, nextTags, doc.id)
+    const owner = await getUserById(doc.user_id) // ownerDept 实时值（部门改码后无需重摄）
     if (doc.status === 'ready') {
       await setDocAclPayload(doc.id, {
         ownerId: doc.user_id,
@@ -141,16 +142,15 @@ export default async function (app) {
       }).catch((e) => req.log.warn(`[acl] payload 同步失败: ${e.message}`))
     }
 
-    const updated = getDoc.get(doc.id)
-    return reply.send({
-      ...updated,
-      grants: listGrantsByDoc.all(doc.id).map((g) => getUserById.get(g.user_id)?.username).filter(Boolean),
-    })
+    const updated = await getDoc(doc.id)
+    const grants2 = await listGrantsByDoc(doc.id)
+    const names = (await Promise.all(grants2.map((g) => getUserById(g.user_id)))).map((u) => u?.username).filter(Boolean)
+    return reply.send({ ...updated, grants: names })
   })
 
   // 删除文档：只在"非摄取中"时允许；仅限本人或 admin；顺序 = 原件 → 向量 → 元数据行（+授权行）
   app.delete('/api/documents/:id', async (req, reply) => {
-    const doc = getDoc.get(req.params.id)
+    const doc = await getDoc(req.params.id)
     if (!doc || (doc.user_id !== req.user.sub && req.user.role !== 'admin')) return reply.code(404).send({ error: '文档不存在' })
     // 摄取中的文档正在被 worker 占用，删除会造成状态错乱，返回 409 冲突
     if (doc.status === 'pending' || doc.status === 'processing') {
@@ -167,8 +167,8 @@ export default async function (app) {
         return reply.code(500).send({ error: `向量删除失败: ${e.message}` })
       }
     }
-    deleteDocRow.run(doc.id)
-    deleteGrantsByDoc.run(doc.id) // 授权行随文档级联清理
+    await deleteDocRow(doc.id)
+    await deleteGrantsByDoc(doc.id) // 授权行随文档级联清理
     return reply.send({ ok: true })
   })
 }

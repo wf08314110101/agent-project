@@ -5,7 +5,7 @@
 // role/dept 每请求查库，改完即刻生效（下次重启会被 env 刷新，env 为准）。
 // ============================================================================
 
-import { listUsers, updateUserMeta } from '../store/sqlite.js'
+import { listUsers, updateUserMeta } from '../store/pg.js'
 
 const ROLES = ['member', 'admin']
 
@@ -15,15 +15,15 @@ export default async function (app) {
     if (req.user.role !== 'admin') return reply.code(403).send({ error: '需要管理员权限' })
   })
 
-  app.get('/api/admin/users', () => listUsers.all())
+  app.get('/api/admin/users', async () => listUsers())
 
   app.patch('/api/admin/users/:id', async (req, reply) => {
     const { role, dept } = req.body ?? {}
     if (role !== undefined && !ROLES.includes(role)) return reply.code(400).send({ error: `role 必须是 ${ROLES.join('/')}` })
     if (dept !== undefined && typeof dept !== 'string') return reply.code(400).send({ error: 'dept 必须是字符串' })
-    const cur = listUsers.all().find((u) => u.id === req.params.id)
+    const cur = (await listUsers()).find((u) => u.id === req.params.id)
     if (!cur) return reply.code(404).send({ error: '用户不存在' })
-    updateUserMeta.run(role ?? cur.role, (dept ?? cur.dept).trim(), req.params.id)
-    return listUsers.all().find((u) => u.id === req.params.id)
+    await updateUserMeta(role ?? cur.role, (dept ?? cur.dept).trim(), req.params.id)
+    return (await listUsers()).find((u) => u.id === req.params.id)
   })
 }

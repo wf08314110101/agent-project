@@ -26,6 +26,10 @@
     "fastify": "^5.1.0",
     "mammoth": "^1.8.0",
     "openai": "^4.70.0",
-    "pdf-parse": "^1.1.1"
+    "pdf-parse": "^1.1.1",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "better-sqlite3": "^12.11.1"
   }
 }

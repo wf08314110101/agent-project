@@ -3,7 +3,7 @@
 // 运行：node --test --experimental-test-module-mocks backend/test/acl.test.mjs
 // ----------------------------------------------------------------------------
 // sanitizeTags 为纯函数直接测；canReadDoc / aclFor 通过 mock.module 桩掉
-// sqlite 依赖（getUserById / listGrantsForUser）后验证判定逻辑。
+// pg 依赖（getUserById / listGrantsForUser）后验证判定逻辑（均为异步函数）。
 // ============================================================================
 
 import { describe, it, beforeEach, afterEach } from 'node:test'
@@ -12,14 +12,14 @@ import { mock } from 'node:test'
 
 // --- 桩数据：模拟 users 表与 doc_grants 表的子集 ---
 // users: { id → { dept } }；grants: { uid → [docId,...] }
-// 桩值固定、状态可变：namedExports 引用闭包函数，测试内改 stub.map 即可切换场景
+// 桩值固定、状态可变：namedExports 引用闭包数据，测试内改 stub.map 即可切换场景
 const stub = { users: new Map(), grants: new Map() }
 
 // mock.module 必须在 acl.js 首次 import 之前注册（需 --experimental-test-module-mocks）
-mock.module('../src/store/sqlite.js', {
+mock.module('../src/store/pg.js', {
   namedExports: {
-    getUserById: { get: (id) => stub.users.get(id) },
-    listGrantsForUser: { all: (uid) => (stub.grants.get(uid) ?? []).map((doc_id) => ({ doc_id })) },
+    getUserById: async (id) => stub.users.get(id),
+    listGrantsForUser: async (uid) => (stub.grants.get(uid) ?? []).map((doc_id) => ({ doc_id })),
   },
 })
 
@@ -72,36 +72,36 @@ describe('canReadDoc', () => {
     stub.users.set('m1', { dept: '研发' })
   })
 
-  it('admin 全通', () => {
-    assert.equal(canReadDoc(U.admin, D({ classification: 'private', user_id: 'm1' })), true)
+  it('admin 全通', async () => {
+    assert.equal(await canReadDoc(U.admin, D({ classification: 'private', user_id: 'm1' })), true)
   })
-  it('owner 总可读自己的私有文档', () => {
-    assert.equal(canReadDoc(U.memberR, D({ classification: 'private', user_id: 'm1' })), true)
+  it('owner 总可读自己的私有文档', async () => {
+    assert.equal(await canReadDoc(U.memberR, D({ classification: 'private', user_id: 'm1' })), true)
   })
-  it('public 全体登录用户可读', () => {
-    assert.equal(canReadDoc(U.memberS, D({ classification: 'public', user_id: 'm1' })), true)
-    assert.equal(canReadDoc(U.memberNoDept, D({ classification: 'public' })), true)
+  it('public 全体登录用户可读', async () => {
+    assert.equal(await canReadDoc(U.memberS, D({ classification: 'public', user_id: 'm1' })), true)
+    assert.equal(await canReadDoc(U.memberNoDept, D({ classification: 'public' })), true)
   })
-  it('dept 同部门可读，跨部门不可读', () => {
-    assert.equal(canReadDoc(U.memberR, D({ classification: 'dept', user_id: 'm1' })), true)
-    assert.equal(canReadDoc(U.memberS, D({ classification: 'dept', user_id: 'm1' })), false)
+  it('dept 同部门可读，跨部门不可读', async () => {
+    assert.equal(await canReadDoc(U.memberR, D({ classification: 'dept', user_id: 'm1' })), true)
+    assert.equal(await canReadDoc(U.memberS, D({ classification: 'dept', user_id: 'm1' })), false)
   })
-  it('dept 当 owner 无部门时无人可读（防泄露）', () => {
+  it('dept 当 owner 无部门时无人可读（防泄露）', async () => {
     stub.users.set('m1', { dept: '' })
-    assert.equal(canReadDoc(U.memberR2, D({ classification: 'dept', user_id: 'm1' })), false)
+    assert.equal(await canReadDoc(U.memberR2, D({ classification: 'dept', user_id: 'm1' })), false)
   })
-  it('private 仅 owner + 显式授权', () => {
-    assert.equal(canReadDoc(U.memberS, D({ classification: 'private', user_id: 'm1' })), false)
+  it('private 仅 owner + 显式授权', async () => {
+    assert.equal(await canReadDoc(U.memberS, D({ classification: 'private', user_id: 'm1' })), false)
     stub.grants.set('m2', ['d1']) // 授权给销售 m2
-    assert.equal(canReadDoc(U.memberS, D({ id: 'd1', classification: 'private', user_id: 'm1' })), true)
+    assert.equal(await canReadDoc(U.memberS, D({ id: 'd1', classification: 'private', user_id: 'm1' })), true)
   })
-  it('授权对 dept 密级也生效（只增不减）', () => {
+  it('授权对 dept 密级也生效（只增不减）', async () => {
     stub.grants.set('m2', ['d1'])
-    assert.equal(canReadDoc(U.memberS, D({ id: 'd1', classification: 'dept', user_id: 'm1' })), true)
+    assert.equal(await canReadDoc(U.memberS, D({ id: 'd1', classification: 'dept', user_id: 'm1' })), true)
   })
-  it('null 输入返回 false', () => {
-    assert.equal(canReadDoc(null, D()), false)
-    assert.equal(canReadDoc(U.memberR, null), false)
+  it('null 输入返回 false', async () => {
+    assert.equal(await canReadDoc(null, D()), false)
+    assert.equal(await canReadDoc(U.memberR, null), false)
   })
 })
 
@@ -109,24 +109,24 @@ describe('canReadDoc', () => {
 // aclFor：检索过滤组装
 // ============================================================================
 describe('aclFor', () => {
-  it('admin 跳过过滤', () => {
-    assert.deepEqual(aclFor(U.admin), { userId: 'a1', role: 'admin', dept: '研发' })
+  it('admin 跳过过滤', async () => {
+    assert.deepEqual(await aclFor(U.admin), { userId: 'a1', role: 'admin', dept: '研发' })
   })
-  it('member 含部门与授权 docId 集合', () => {
+  it('member 含部门与授权 docId 集合', async () => {
     stub.grants.set('m1', ['d1', 'd2'])
-    const a = aclFor(U.memberR)
+    const a = await aclFor(U.memberR)
     assert.equal(a.role, 'member')
     assert.equal(a.dept, '研发')
     assert.deepEqual(a.grants, ['d1', 'd2'])
   })
-  it('member 无授权时 grants 为空数组', () => {
-    const a = aclFor(U.memberNoDept)
+  it('member 无授权时 grants 为空数组', async () => {
+    const a = await aclFor(U.memberNoDept)
     assert.deepEqual(a.grants, [])
     assert.equal(a.dept, '')
   })
-  it('无用户上下文返回 null（脚本/评估不过滤）', () => {
-    assert.equal(aclFor(null), null)
-    assert.equal(aclFor(undefined), null)
+  it('无用户上下文返回 null（脚本/评估不过滤）', async () => {
+    assert.equal(await aclFor(null), null)
+    assert.equal(await aclFor(undefined), null)
   })
 })
 

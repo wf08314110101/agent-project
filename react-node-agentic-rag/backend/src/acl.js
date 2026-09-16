@@ -8,7 +8,7 @@
 // 密级三级：public（全体登录用户）/ dept（同 owner 部门）/ private（仅 owner + 显式授权）
 // ============================================================================
 
-import { getUserById, listGrantsForUser } from './store/sqlite.js'
+import { getUserById, listGrantsForUser } from './store/pg.js'
 
 // 受控枚举：密级与标签均不开放自由文本（自由标签会稀释筛选价值，后续按需扩充）
 export const CLASSIFICATIONS = ['public', 'dept', 'private']
@@ -29,17 +29,18 @@ export function sanitizeTags(tags) {
  * @param {object} doc  - documents 行（需含 user_id / classification）
  * 规则：admin 全通 → 本人 → public → dept 同部门 → 显式授权（doc_grants）
  */
-export function canReadDoc(user, doc) {
+export async function canReadDoc(user, doc) {
   if (!user || !doc) return false
   const uid = user.sub ?? user.id
   if (user.role === 'admin' || doc.user_id === uid) return true
   if (doc.classification === 'public') return true
   if (doc.classification === 'dept') {
-    const owner = getUserById.get(doc.user_id)
+    const owner = await getUserById(doc.user_id)
     if (owner?.dept && owner.dept === user.dept) return true
   }
   // 显式授权兜底（对 dept/private 同样生效：授权只增不减，无安全洞）
-  return listGrantsForUser.all(uid).some((g) => g.doc_id === doc.id)
+  const grants = await listGrantsForUser(uid)
+  return grants.some((g) => g.doc_id === doc.id)
 }
 
 /**
@@ -47,14 +48,15 @@ export function canReadDoc(user, doc) {
  * admin 返回 role:'admin'（检索侧跳过过滤）；member 附带显式授权的 docId 集合。
  * 缺省（无用户上下文的脚本/评估直连）返回 null = 不过滤。
  */
-export function aclFor(user) {
+export async function aclFor(user) {
   if (!user) return null
   const uid = user.sub ?? user.id
   if (user.role === 'admin') return { userId: uid, role: 'admin', dept: user.dept ?? '' }
+  const grants = await listGrantsForUser(uid)
   return {
     userId: uid,
     role: user.role ?? 'member',
     dept: user.dept ?? '',
-    grants: listGrantsForUser.all(uid).map((g) => g.doc_id),
+    grants: grants.map((g) => g.doc_id),
   }
 }

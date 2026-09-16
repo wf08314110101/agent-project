@@ -20,7 +20,7 @@ export default async function (app) {
 
     const started = Date.now()
     // M10 RBAC：调试口同样受 ACL 约束（admin 全通；member 只看可读资料），避免观测口绕过权限
-    const hits = await retrieve(q, topK, docId, aclFor(req.user))
+    const hits = await retrieve(q, topK, docId, await aclFor(req.user))
     return {
       query: q,
       topK,

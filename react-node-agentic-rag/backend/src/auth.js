@@ -7,7 +7,7 @@
 
 import { randomUUID, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
 import { config } from './config.js'
-import { upsertUser, getUserByName, backfillDocsToUser } from './store/sqlite.js'
+import { upsertUser, getUserByName, backfillDocsToUser } from './store/pg.js'
 
 /** 生成 scrypt 口令哈希：`salt:hash`（hex），64 字节派生长度 */
 export function hashPassword(pwd) {
@@ -25,8 +25,8 @@ export function verifyPassword(pwd, stored) {
 }
 
 /** 登录校验：返回用户行或 null（用户不存在与密码错误统一返回 null，避免枚举用户名） */
-export function checkLogin(username, password) {
-  const u = getUserByName.get(username)
+export async function checkLogin(username, password) {
+  const u = await getUserByName(username)
   return u && verifyPassword(password, u.pass_hash) ? u : null
 }
 
@@ -34,23 +34,23 @@ export function checkLogin(username, password) {
  * 启动播种：AUTH_USERS 里的用户逐个入库（幂等）。
  * 密码只写一次不覆盖；role/dept 每次启动按 env 刷新（改角色/部门改 env 即可）。
  */
-export function seedUsers(log = console) {
+export async function seedUsers(log = console) {
   if (!config.auth.users.length) {
     log.warn?.('[auth] AUTH_USERS 未配置：无人能登录。格式 AUTH_USERS=用户名:密码[:角色:部门],…')
     return
   }
   let n = 0
   for (const { username, password, role, dept } of config.auth.users) {
-    const before = getUserByName.get(username)
-    upsertUser.run(randomUUID(), username, hashPassword(password), role, dept)
+    const before = await getUserByName(username)
+    await upsertUser(randomUUID(), username, hashPassword(password), role, dept)
     if (!before) n++
   }
   // 历史文档回填：M5 前入库的文档（user_id=''）划给首个预置用户，否则无人能管理/删除
   const first = config.auth.users[0]
-  const owner = getUserByName.get(first.username)
+  const owner = await getUserByName(first.username)
   if (owner) {
-    const r = backfillDocsToUser.run(owner.id)
-    if (r.changes) log.info?.(`[auth] 历史文档归属回填 → ${first.username}（${r.changes} 个）`)
+    const changes = await backfillDocsToUser(owner.id)
+    if (changes) log.info?.(`[auth] 历史文档归属回填 → ${first.username}（${changes} 个）`)
   }
   log.info?.(`[auth] 预置用户就绪（新增 ${n}/${config.auth.users.length}）`)
 }

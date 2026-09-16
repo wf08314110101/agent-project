@@ -17,7 +17,7 @@ export default async function (app) {
       const { username, password } = req.body ?? {}
       if (!username || !password) return reply.code(400).send({ error: 'username/password 必填' })
 
-      const u = checkLogin(String(username), String(password))
+      const u = await checkLogin(String(username), String(password))
       if (!u) return reply.code(401).send({ error: '用户名或密码错误' })
 
       const token = app.jwt.sign({ sub: u.id, username: u.username }, { expiresIn: '24h' })

@@ -15,7 +15,7 @@ import { runAgent } from '../agent/graph.js'
 import { AGENT_SYSTEM } from '../agent/prompts.js'
 import { compressMemory, memoryFallback } from '../agent/memory.js'
 import { rootSpan, runInCtx, flushObs } from '../obs/otel.js'
-import { insertSession, getSession, insertMsg, getMemory, listAfterSeq, getDoc } from '../store/sqlite.js'
+import { insertSession, getSession, insertMsg, getMemory, listAfterSeq, getDoc } from '../store/pg.js'
 import { countPoints } from '../rag/qdrant.js'
 import { canReadDoc, aclFor } from '../acl.js'
 import { config } from '../config.js'
@@ -49,17 +49,17 @@ export default async function (app) {
       if (!question?.trim()) return reply.code(400).send({ error: 'question 必填' })
       // 指定文档问答：docId 必须对当前用户可读（RBAC 单点判定），否则 404 不泄露存在性
       if (docId) {
-        const doc = getDoc.get(docId)
-        if (!doc || !canReadDoc(req.user, doc)) return reply.code(404).send({ error: '文档不存在' })
+        const doc = await getDoc(docId)
+        if (!doc || !(await canReadDoc(req.user, doc))) return reply.code(404).send({ error: '文档不存在' })
       }
 
       // 会话：无 sessionId（或 sessionId 不属于当前用户）则以首问建新会话
       // 归属校验：别人的 sessionId 对本用户等同「不存在」，静默新建而非 403，避免泄露会话存在性
-      let session = sessionId ? getSession.get(sessionId) : undefined
+      let session = sessionId ? await getSession(sessionId) : undefined
       if (session && session.user_id !== req.user.sub) session = undefined
       if (!session) {
         const id = randomUUID()
-        insertSession.run(id, question.slice(0, 24), req.user.sub)
+        await insertSession(id, question.slice(0, 24), req.user.sub)
         session = { id }
       }
 
@@ -126,14 +126,13 @@ export default async function (app) {
         )
       } catch (e) {
         req.log.warn(`[memory] 压缩失败，退化为窗口回放: ${e.message}`)
-        memoryNote = memoryFallback(session.id)
+        memoryNote = await memoryFallback(session.id)
       }
 
       // 历史回放：压缩断点之后的所有消息（= 窗口 + 未压缩真空区，零丢失；
       // meta 里的 sources/steps 不回放：一次性过程数据，混进上下文反而干扰模型）
-      const boundary = getMemory.get(session.id)?.summarized_seq ?? 0
-      const history = listAfterSeq
-        .all(session.id, boundary)
+      const boundary = (await getMemory(session.id))?.summarized_seq ?? 0
+      const history = (await listAfterSeq(session.id, boundary))
         .map((m) => ({ role: m.role, content: m.content }))
 
       // 组装最终输入：系统提示 → （可选）空库提示 → （可选）会话记忆摘要 → 断点后历史 → 当前问题
@@ -149,6 +148,7 @@ export default async function (app) {
 
       try {
         // 运行 Agent 主图（ReAct 循环）—— 在根 span 上下文内执行，子 span 自动挂树
+        const acl = await aclFor(req.user) // M10 RBAC：密级/归属/授权的服务端召回前过滤
         const result = await runInCtx(root, () =>
           runAgent({
             messages: input,
@@ -157,7 +157,7 @@ export default async function (app) {
             emit,
             usageAcc,
             docId, // 指定文档问答范围（可选），贯穿到 search_kb 子图
-            acl: aclFor(req.user), // M10 RBAC：密级/归属/授权的服务端召回前过滤
+            acl,
           })
         )
 
@@ -184,8 +184,8 @@ export default async function (app) {
         root.setAttr('output.value', answer)
 
         // 持久化：步骤/来源/用量随 meta 存档，刷新页面可回放
-        insertMsg.run(session.id, 'user', question, null)
-        insertMsg.run(
+        await insertMsg(session.id, 'user', question, null)
+        await insertMsg(
           session.id,
           'assistant',
           answer,

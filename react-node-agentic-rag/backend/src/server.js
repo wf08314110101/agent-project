@@ -21,7 +21,7 @@ import { config } from './config.js'
 import { ensureCollection } from './rag/qdrant.js'
 import { createIngestWorker } from './rag/ingest.js'
 import { seedUsers } from './auth.js'
-import { getUserById } from './store/sqlite.js'
+import { getUserById } from './store/pg.js'
 import healthRoutes from './routes/health.js'
 import authRoutes from './routes/auth.js'
 import documentRoutes from './routes/documents.js'
@@ -62,13 +62,13 @@ app.decorate('authenticate', async (req, reply) => {
   } catch {
     return reply.code(401).send({ error: '未登录或登录已过期，请重新登录' })
   }
-  const u = getUserById.get(req.user.sub)
+  const u = await getUserById(req.user.sub)
   if (!u) return reply.code(401).send({ error: '用户不存在，请重新登录' })
   req.user = { sub: u.id, username: u.username, role: u.role || 'member', dept: u.dept || '' }
 })
 
 // 预置用户播种：AUTH_USERS → users 表（scrypt 哈希，幂等）
-seedUsers(app.log)
+await seedUsers(app.log)
 
 // ---- 业务路由 ----
 app.register(healthRoutes)    // GET  /api/health          健康检查（开放，供容器探活）
@@ -88,7 +88,7 @@ app.register(protectedRoutes)
 // 摄取 worker：单并发后台消费 pending 文档
 // 单并发原因：嵌入是 CPU 密集操作（transformers.js），多并发会互相争抢 CPU
 const ingest = createIngestWorker(app.log)
-ingest.start()
+await ingest.start()
 
 // 启动即确保集合存在（幂等；Qdrant 未就绪不阻塞启动，上传时会再 ensure）
 try {

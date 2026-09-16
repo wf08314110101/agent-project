@@ -32,6 +32,7 @@ import sessionRoutes from './routes/sessions.js'
 import debugRoutes from './routes/debug.js'
 import adminRoutes from './routes/admin.js'
 import { initObs, flushObs } from './obs/otel.js'
+import mcpHttpPlugin from './mcp/http.js'
 
 // 启动统一观测层：一次埋点按配置扇出（PHOENIX_ENABLED / LANGFUSE_* 三项）
 initObs()
@@ -95,6 +96,12 @@ const protectedRoutes = async (api) => {
   api.register(adminRoutes)     // 用户管理（admin only）
 }
 app.register(protectedRoutes)
+
+// M13 MCP Server：配置 MCP_HTTP_TOKEN 才挂 POST /mcp（Streamable HTTP + Bearer 鉴权）
+if (config.mcp.enabled && config.mcp.httpToken) {
+  app.register(mcpHttpPlugin)
+  app.log.info('[mcp] Streamable HTTP → POST /mcp（Bearer 鉴权已启用）')
+}
 
 // 摄取 worker：单并发后台消费 pending 文档
 // 单并发原因：嵌入是 CPU 密集操作（transformers.js），多并发会互相争抢 CPU

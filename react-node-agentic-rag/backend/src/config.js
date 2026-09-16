@@ -112,6 +112,12 @@ export const config = {
     publicKey: env('LANGFUSE_PUBLIC_KEY', ''),
     secretKey: env('LANGFUSE_SECRET_KEY', ''),
   },
+  // ---- M13 MCP Server（知识库服务化）：全部工具只读，走 canReadDoc/aclFor 同源 ACL ----
+  mcp: {
+    enabled: env('MCP_ENABLED', 'true') === 'true',
+    accessUser: env('MCP_ACCESS_USER', ''),  // 服务身份用户名（AUTH_USERS 里的预置用户）；空 = 仅 public 匿名
+    httpToken: env('MCP_HTTP_TOKEN', ''),    // 非空才挂 POST /mcp（Streamable HTTP + Bearer）；stdio 入口不受此项控制
+  },
   // ---- Phoenix 观测（可选）：OpenTelemetry → Phoenix，默认关闭 ----
   phoenixEnabled: env('PHOENIX_ENABLED', 'false') === 'true',
   phoenixEndpoint: env('PHOENIX_ENDPOINT', 'http://localhost:6006/v1/traces'), // Phoenix 的 OTLP 接收端点

@@ -218,3 +218,26 @@ export async function countPoints() {
   countCache = { v: count, at: Date.now() }
   return count
 }
+
+/**
+ * 按 docId 滚动拉取全部向量点 payload（M13 MCP resource 全文读取用）：
+ * 分页 scroll 直至取尽，按 chunkIndex 升序返回 payload（text 等）。
+ */
+export async function scrollDocPoints(docId, hardLimit = 2000) {
+  const filter = { must: [{ key: 'docId', match: { value: docId } }] }
+  const out = []
+  let offset
+  do {
+    const page = await qdrant.scroll(config.qdrantCollection, {
+      filter,
+      with_payload: true,
+      limit: 100,
+      offset,
+    })
+    out.push(...page.points)
+    offset = page.next_page_offset
+  } while (offset !== undefined && out.length < hardLimit)
+  return out
+    .sort((a, b) => (a.payload?.chunkIndex ?? 0) - (b.payload?.chunkIndex ?? 0))
+    .map((p) => p.payload ?? {})
+}

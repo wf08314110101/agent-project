@@ -12,7 +12,8 @@ React 5174 ──SSE── Fastify 8788 ──┬── DeepSeek (LLM, 工具调
   DocsTab: 上传+状态轮询            ├── LangGraph 主图: agent ⇄ tools (ReAct loop)
                                    │      └─ search_kb 子图: retrieve → grade → rewrite
                                    ├── Qdrant 6333 (向量) ←─ 本地嵌入 bge-small-zh (ONNX)
-                                   └── SQLite (文档/会话/消息)
+                                   ├── Postgres 5432 (文档/会话/消息) ｜ Redis 6379 (可选，多实例共享态)
+                                   └── MCP Server (M13) ←─ Cursor / Claude Code / Trae 等客户端直连检索
 观测: OTel 单管道双导出 → Langfuse 云端 ｜ Phoenix (PHOENIX_ENABLED=true)
 ```
 
@@ -27,6 +28,7 @@ React 5174 ──SSE── Fastify 8788 ──┬── DeepSeek (LLM, 工具调
 - **思维链通道**：reasoning token 走独立 SSE 事件（deepseek-reasoner 等模型自动生效），前端折叠面板展示，不与正文混流
 - **鉴权**：预置用户 + JWT 登录（scrypt 存储密码，24h 有效期），会话/文档按用户隔离；登录接口单独限流
 - **可观测**：单一 OTel 管道双导出——Langfuse trace/span/usage + Phoenix OpenInference，一次埋点两平台同构
+- **MCP 服务化（M13）**：知识库暴露为 MCP Server，Cursor/Claude Code/Trae/Inspector 等客户端直连检索；4 个只读工具 + 全文 Resource，双传输 stdio（独立进程）/ Streamable HTTP（Bearer）；ACL 与 Web 端同源（canReadDoc/aclFor，密级召回前过滤）
 - **生产防线**：限流（全局 120/min、chat 20/min、login 10/min）、知识库为空降级直答、坏用例回归脚本、容器化部署（compose 健康检查依赖）、CI（回归 + 镜像构建）
 
 ## 快速开始
@@ -63,6 +65,7 @@ docker compose up -d backend frontend
 | `MEMORY_WINDOW` | 20 | 会话窗口条数（更早消息滚动摘要压缩） |
 | `JWT_SECRET` | dev-insecure-secret | JWT 签名密钥，生产必须改随机长串 |
 | `AUTH_USERS` | - | 预置用户 `用户名:密码[:角色[:部门]]`（M10），角色 member/admin；启动播种（不配则无人能登录） |
+| `MCP_ENABLED` / `MCP_ACCESS_USER` / `MCP_HTTP_TOKEN` | true / - / - | MCP Server（M13）：服务身份用户名（空 = 仅 public 匿名）/ 非空才挂 `POST /mcp`（Bearer）；stdio 入口不受这两项控制 |
 | `LANGFUSE_*` | - | 配置即启用，不配为空壳 |
 | `PHOENIX_ENABLED` / `PHOENIX_ENDPOINT` | false | OTel → Phoenix |
 
@@ -87,6 +90,39 @@ docker compose up -d backend frontend
 **M10 RBAC**：密级三级 `public`（全体登录用户）/ `dept`（同归属人部门）/ `private`（仅 owner + 显式授权），受控标签枚举（技术方案/制度/会议纪要/运维/竞品/测试）。密级下沉为 Qdrant payload 在**召回前服务端过滤**（ownerId/classification/ownerDept），检索后隐藏等于没保护；`canReadDoc`（backend/src/acl.js）是唯一可读性判定单点，不可读一律 404 不泄露存在性；JWT 只放 sub，role/dept 每请求查库（改角色即刻生效）。PATCH 密级同步 `setPayload`，改完即生效无需重摄；启动时对无密级旧点位回填 public（保持升级前可见性）。新上传默认 private。
 
 `POST /api/chat` 事件流：`step`(action/observation，时间线) → `sources`(来源卡片，带全局引用编号) → `delta`(正文 token) ｜ `reasoning`(思维链 token，独立通道) → `usage`(轮次/token/耗时) → `done`(stopReason: normal/max_iter/abort/error) ｜ `error`。
+
+## MCP 接入（M13）
+
+知识库作为 MCP Server（`@modelcontextprotocol/sdk`），全部工具**只读**，ACL 与 Web 端同源（服务身份 = `MCP_ACCESS_USER` 指定的预置用户，未配置则仅 public）。
+
+| 工具 | 说明 |
+|------|------|
+| `rag_search` | 混合检索（稠密+稀疏 RRF），ACL 召回前过滤；支持 `k`/`docId` |
+| `rag_list_docs` | 服务身份可见文档列表（密级/标签/分块/状态） |
+| `rag_doc_status` | 单文档摄取状态；不可读按 404 语义 |
+| `rag_stats` | 文档数（按状态分组）+ 向量点数（30s TTL 缓存） |
+| Resource `rag://docs/{docId}` | 文档全文（分块按 chunkIndex 拼回） |
+
+**stdio（本地 IDE，无需后端在线）**——Cursor / Claude Code / Trae 的 mcpServers 配置：
+
+```json
+{ "mcpServers": { "rag-kb": {
+    "command": "node",
+    "args": ["/绝对路径/react-node-agentic-rag/backend/src/mcp/stdio.mjs"],
+    "env": { "MCP_ACCESS_USER": "demo" }
+}}}
+```
+
+**Streamable HTTP（团队共享/远程 agent）**——后端配 `MCP_HTTP_TOKEN=<token>` 启动后：
+
+```bash
+curl -X POST http://localhost:8788/mcp \
+  -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+冒烟验证：`node backend/scripts/mcp-smoke.mjs stdio`（或 `http`，需 8790 端口实例带 token；模拟 SDK Client 完整握手 + 4 工具 + resources）。
 
 ## 回归与评估
 
@@ -118,15 +154,17 @@ M9 cross-encoder 实验结论（[reranker.js](backend/src/rag/reranker.js) + `re
 4. nginx 反代 SSE 必须 `proxy_buffering off`，否则流式变一次性输出
 5. SSE 误判断开：POST 体读完 `req.raw` 也会 close，需 `writableEnded` 守卫
 6. `@node-rs/jieba` 必须显式 `Jieba.withDict` 加载词典，否则中文全切成单字，BM25 稀疏向量失效
+7. MCP stdio 传输：stdout 是 JSON-RPC 协议通道，入口必须把 `console.log` 重定向到 stderr（embedder/qdrant 是懒加载，日志在调用时才打）
+8. 摄取状态枚举是 `pending/processing/ready/failed`（不是 `done`）；MCP Resource 列表按 `ready` 过滤
 
 ## 目录
 
 ```
 backend/src/  server·config·auth·acl ｜ routes/(auth·chat·documents·sessions·debug·admin·health)
               rag/(parser·chunker·embedder·tokenizer·qdrant·ingest·retriever·reranker·websearch)
-              agent/(graph·search-graph·tools·prompts·memory) ｜ store/sqlite ｜ obs/otel
+              agent/(graph·search-graph·tools·prompts·memory) ｜ store/pg ｜ mcp/(mcp-server·stdio·http) ｜ obs/otel
 frontend/src/ App ｜ components/(Login·ChatTab·DocsTab) ｜ api(token + SSE 解析)
-scripts/      regression.mjs（回归）· evaluate.mjs（评估）
+scripts/      regression.mjs（回归）· evaluate.mjs（评估）· backend/scripts/mcp-smoke.mjs（MCP 冒烟）· migrate-sqlite-to-pg.mjs（M11 迁移）
 evals/        golden.jsonl（34 题标注）· fixtures/（8 文档）· results/（基线存档）
 .github/      workflows/ci.yml（回归 + 镜像构建）
 docs/         功能演进时间线.md

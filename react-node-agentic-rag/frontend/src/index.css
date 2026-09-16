@@ -29,6 +29,30 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .app-header nav button.on { background: var(--brand); color: #fff; }
 
+.user-box { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--muted); }
+.logout-btn { background: transparent; color: var(--muted); padding: 4px 10px; font-size: 13px; }
+.logout-btn:hover { color: var(--warn); }
+
+/* ---------- Login ---------- */
+.login-mask {
+  min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  background: var(--bg); padding: 16px;
+}
+.login-card {
+  width: 340px; display: flex; flex-direction: column; gap: 12px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+  padding: 32px 28px; box-shadow: 0 6px 24px rgba(31, 35, 41, 0.06);
+}
+.login-card h1 { font-size: 20px; text-align: center; }
+.login-hint { font-size: 13px; color: var(--muted); text-align: center; margin-bottom: 6px; }
+.login-input {
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px;
+  font: inherit; outline: none;
+}
+.login-input:focus { border-color: var(--brand); }
+.login-err { font-size: 13px; color: var(--warn); }
+.login-btn { padding: 10px 0; background: var(--brand); color: #fff; font-weight: 500; }
+
 main { margin-top: 16px; }
 
 /* ---------- Chat ---------- */

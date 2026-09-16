@@ -1,13 +1,29 @@
 // 坏用例回归脚本：对活服务跑一批「坏用例」，断言 Agent 行为不回退
 // 用法：先 start.sh 起服务，然后 node scripts/regression.mjs（BASE_URL 可覆盖）
+// 鉴权：M5 起接口需 JWT——默认以 demo/demo123 登录，可用 AUTH_USER/AUTH_PASS 覆盖
 // 退出码：全过 0，有失败 1 —— 可挂 CI
 const BASE = process.env.BASE_URL || 'http://localhost:8788'
+const AUTH_USER = process.env.AUTH_USER || 'demo'
+const AUTH_PASS = process.env.AUTH_PASS || 'demo123'
+
+// ---------- 鉴权 ----------
+let TOKEN = ''
+async function login() {
+  const r = await fetch(`${BASE}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: AUTH_USER, password: AUTH_PASS }),
+  })
+  if (!r.ok) throw new Error(`登录失败 HTTP ${r.status}: ${(await r.text()).slice(0, 120)}`)
+  TOKEN = (await r.json()).token
+}
+const authHeaders = () => ({ authorization: `Bearer ${TOKEN}` })
 
 // ---------- SSE 客户端 ----------
 async function chat({ question, sessionId, topK = 5 }) {
   const res = await fetch(`${BASE}/api/chat`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ question, sessionId, topK }),
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`)
@@ -58,11 +74,11 @@ Agentic RAG 系统设置最大工具调用轮数为 6，超限后强制模型基
 async function uploadFixture() {
   const fd = new FormData()
   fd.append('file', new Blob([FIXTURE]), 'regression-fixture.md')
-  const r = await fetch(`${BASE}/api/documents`, { method: 'POST', body: fd })
+  const r = await fetch(`${BASE}/api/documents`, { method: 'POST', headers: authHeaders(), body: fd })
   if (!r.ok && r.status !== 409) throw new Error(`上传失败 HTTP ${r.status}`)
   // 等摄取完成（最多 60s）
   for (let i = 0; i < 60; i++) {
-    const docs = await (await fetch(`${BASE}/api/documents`)).json()
+    const docs = await (await fetch(`${BASE}/api/documents`, { headers: authHeaders() })).json()
     const d = docs.find((x) => x.filename === 'regression-fixture.md')
     if (d?.status === 'ready') return
     if (d?.status === 'failed') throw new Error(`fixture 摄取失败: ${d.error}`)
@@ -137,6 +153,8 @@ const ok = (cond, msg) => {
 console.log(`\n== Agentic RAG 回归测试 → ${BASE} ==\n`)
 
 try {
+  await login()
+  console.log(`已登录: ${AUTH_USER}\n`)
   await uploadFixture()
   console.log('fixture 就绪\n')
 } catch (e) {

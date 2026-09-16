@@ -5,6 +5,12 @@ services:
     ports: ["6333:6333", "6334:6334"]
     volumes: ["qdrant_data:/qdrant/storage"]
     restart: unless-stopped
+    # M5 健康检查：backend 依赖其就绪后才启动（/readyz 表示可服务）
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':<>/dev/tcp/127.0.0.1/6333'"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
 
   phoenix:
     image: arizephoenix/phoenix:latest
@@ -23,7 +29,16 @@ services:
       PHOENIX_ENDPOINT: http://phoenix:6006/v1/traces
     volumes:
       - ./backend/data:/app/data # sqlite + 嵌入模型缓存持久化
-    depends_on: [qdrant]
+    # M5 健康检查：node 原生 fetch 探活 /api/health（含 Qdrant 连通性）
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:8788/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    depends_on:
+      qdrant:
+        condition: service_healthy
     restart: unless-stopped
 
   # 应用前端：nginx 托管 dist 并反代 /api
@@ -31,7 +46,9 @@ services:
     build: ./frontend
     container_name: agentic-rag-frontend
     ports: ["8080:80"]
-    depends_on: [backend]
+    depends_on:
+      backend:
+        condition: service_healthy # 前端反代的目标必须先就绪
     restart: unless-stopped
 
 volumes:

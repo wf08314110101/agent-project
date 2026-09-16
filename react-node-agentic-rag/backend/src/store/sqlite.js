@@ -23,6 +23,13 @@ const db = new Database(config.sqlitePath)
 db.pragma('journal_mode = WAL')
 
 db.exec(`
+CREATE TABLE IF NOT EXISTS users (
+  id         TEXT PRIMARY KEY,        -- UUID
+  username   TEXT UNIQUE NOT NULL,    -- 登录名（唯一）
+  pass_hash  TEXT NOT NULL,           -- scrypt 哈希（salt:hash），不存明文
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS documents (
   id         TEXT PRIMARY KEY,        -- UUID，同时是 Qdrant 里 payload.docId
   filename   TEXT NOT NULL,           -- 原始文件名（展示用）
@@ -49,8 +56,22 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 );
 `)
 
+// M5 数据归属：会话/文档挂用户（老库默认 ''，即不可见——历史数据仅本地开发遗留，不做回填）
+try { db.exec("ALTER TABLE sessions ADD COLUMN user_id TEXT NOT NULL DEFAULT ''") } catch { }
+try { db.exec("ALTER TABLE documents ADD COLUMN user_id TEXT NOT NULL DEFAULT ''") } catch { }
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)') } catch { }
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_documents_user ON documents(user_id)') } catch { }
+
 // 历史查询按 session 过滤，无索引会全表扫
 db.exec('CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id)')
+
+// ---- users：登录账号（AUTH_USERS 预置播种）----
+export const upsertUser = db.prepare(
+  'INSERT INTO users (id, username, pass_hash) VALUES (?, ?, ?) ON CONFLICT(username) DO NOTHING'
+)
+export const getUserByName = db.prepare('SELECT * FROM users WHERE username = ?')
+// 历史文档归属回填：M5 升级前入库的文档 user_id=''（无主），统一划给首个预置用户管理
+export const backfillDocsToUser = db.prepare("UPDATE documents SET user_id = ? WHERE user_id = ''")
 
 // 老库列迁移（已存在则忽略）：早期版本没有 error/path 两列
 try { db.exec('ALTER TABLE documents ADD COLUMN error TEXT') } catch { }
@@ -62,9 +83,9 @@ try { db.exec('ALTER TABLE sessions DROP COLUMN summarized_count') } catch { } /
 
 // ---- documents：摄取队列 + 文档管理 ----
 export const insertDoc = db.prepare(
-  'INSERT INTO documents (id, filename, size, hash, chunks, status, error, path) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  'INSERT INTO documents (id, filename, size, hash, chunks, status, error, path, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
 )
-export const listDocs = db.prepare('SELECT * FROM documents ORDER BY created_at DESC')
+export const listDocsByUser = db.prepare('SELECT * FROM documents WHERE user_id = ? ORDER BY created_at DESC')
 export const getDoc = db.prepare('SELECT * FROM documents WHERE id = ?')
 export const getDocByHash = db.prepare('SELECT * FROM documents WHERE hash = ?')
 export const deleteDocRow = db.prepare('DELETE FROM documents WHERE id = ?')
@@ -77,9 +98,9 @@ export const nextPendingDoc = db.prepare(
 )
 export const resetProcessing = db.prepare("UPDATE documents SET status = 'pending' WHERE status = 'processing'")
 
-// ---- sessions：会话管理 ----
-export const insertSession = db.prepare('INSERT INTO sessions (id, title) VALUES (?, ?)')
-export const listSessions = db.prepare('SELECT * FROM sessions ORDER BY created_at DESC')
+// ---- sessions：会话管理（M5 起按 user_id 隔离）----
+export const insertSession = db.prepare('INSERT INTO sessions (id, title, user_id) VALUES (?, ?, ?)')
+export const listSessionsByUser = db.prepare('SELECT * FROM sessions WHERE user_id = ? ORDER BY created_at DESC')
 export const getSession = db.prepare('SELECT * FROM sessions WHERE id = ?')
 export const deleteSession = db.prepare('DELETE FROM sessions WHERE id = ?')
 export const deleteSessionMsgs = db.prepare('DELETE FROM chat_messages WHERE session_id = ?')

@@ -11,7 +11,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { ACCEPT_EXT, hashBuffer } from '../rag/parser.js'
 import { createIngestWorker } from '../rag/ingest.js'
-import { insertDoc, listDocs, getDoc, getDocByHash, deleteDocRow } from '../store/sqlite.js'
+import { insertDoc, listDocsByUser, getDoc, getDocByHash, deleteDocRow } from '../store/sqlite.js'
 import { deleteDocPoints } from '../rag/qdrant.js'
 import { config } from '../config.js'
 
@@ -32,9 +32,14 @@ export default async function (app) {
       const buf = await file.toBuffer() // 一次性读入内存（已有 fileSize 上限保护）
 
       // 内容级幂等：同文件不重复摄取（SHA-256 相同即视为重复，改文件名也不影响）
+      // 归属语义：hash 全库唯一（知识库是共享池，同一内容只嵌一份向量）；
+      // 本人重复上传 → duplicated 跳过；他人已传 → 409 提示，不重复占存储
       const hash = hashBuffer(buf)
       const dup = getDocByHash.get(hash)
-      if (dup) return reply.send({ duplicated: true, doc: dup })
+      if (dup) {
+        if (dup.user_id === req.user.sub) return reply.send({ duplicated: true, doc: dup })
+        return reply.code(409).send({ error: '相同内容的文档已存在（由其他用户上传）' })
+      }
 
       // 原件落盘，worker 从磁盘读取（接口尽快返回，不做重活）
       const docId = randomUUID()
@@ -42,8 +47,8 @@ export default async function (app) {
       const filePath = path.join(config.uploadsDir, `${docId}.${ext}`)
       await fs.writeFile(filePath, buf)
 
-      // 元数据入队：status=pending，worker 会 wake 起来消费
-      insertDoc.run(docId, file.filename, buf.length, hash, 0, 'pending', null, filePath)
+      // 元数据入队：status=pending，挂当前用户归属，worker 会 wake 起来消费
+      insertDoc.run(docId, file.filename, buf.length, hash, 0, 'pending', null, filePath, req.user.sub)
       worker.wake()
 
       // 202 Accepted：任务已受理，尚未完成
@@ -60,13 +65,13 @@ export default async function (app) {
     }
   })
 
-  // 文档列表：按创建时间倒序，含 status/chunks/error，前端轮询渲染
-  app.get('/api/documents', () => listDocs.all())
+  // 文档列表：当前用户自己的，按创建时间倒序，含 status/chunks/error，前端轮询渲染
+  app.get('/api/documents', (req) => listDocsByUser.all(req.user.sub))
 
-  // 删除文档：只在"非摄取中"时允许；顺序 = 原件 → 向量 → 元数据行
+  // 删除文档：只在"非摄取中"时允许；仅限本人文档；顺序 = 原件 → 向量 → 元数据行
   app.delete('/api/documents/:id', async (req, reply) => {
     const doc = getDoc.get(req.params.id)
-    if (!doc) return reply.code(404).send({ error: '文档不存在' })
+    if (!doc || doc.user_id !== req.user.sub) return reply.code(404).send({ error: '文档不存在' })
     // 摄取中的文档正在被 worker 占用，删除会造成状态错乱，返回 409 冲突
     if (doc.status === 'pending' || doc.status === 'processing') {
       return reply.code(409).send({ error: '文档正在摄取中，请稍后再删' })

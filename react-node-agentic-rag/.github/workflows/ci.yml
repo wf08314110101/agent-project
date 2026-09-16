@@ -1,0 +1,72 @@
+# CI：回归测试（坏用例断言）+ 应用镜像构建
+# 触发：push 到 main / PR 到 main
+# 说明：回归依赖真实 LLM_API_KEY（Secrets 配置）；无 Secret 时跳过回归只做构建
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  regression:
+    name: 坏用例回归
+    runs-on: ubuntu-latest
+    if: ${{ vars.RUN_REGRESSION == 'true' }} # 需同时配置 Secret LLM_API_KEY 与变量 RUN_REGRESSION=true
+    services:
+      qdrant:
+        image: qdrant/qdrant:latest
+        ports: ["6333:6333"]
+        options: >-
+          --health-cmd "bash -c ':<>/dev/tcp/127.0.0.1/6333'"
+          --health-interval 5s
+          --health-retries 12
+    env:
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: 安装后端依赖
+        working-directory: backend
+        run: npm ci
+      - name: 启动后端
+        working-directory: backend
+        run: |
+          cp .env.example .env
+          # CI 覆盖：真实 key + 固定鉴权 + 关闭观测
+          sed -i 's|^LLM_API_KEY=.*|LLM_API_KEY=${{ secrets.LLM_API_KEY }}|' .env
+          printf 'JWT_SECRET=ci-only-secret\nAUTH_USERS=demo:demo123\nPHOENIX_ENABLED=false\n' >> .env
+          nohup node src/server.js > server.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -sf http://localhost:8788/api/health >/dev/null && break
+            sleep 2
+          done
+          curl -sf http://localhost:8788/api/health || (cat server.log && exit 1)
+      - name: 跑回归
+        run: node scripts/regression.mjs
+
+  build:
+    name: 镜像构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: 构建后端镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          push: false # 仅验证可构建；发布需另配 registry 凭据
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: 构建前端镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

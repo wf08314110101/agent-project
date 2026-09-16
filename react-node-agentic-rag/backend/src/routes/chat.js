@@ -47,11 +47,13 @@ export default async function (app) {
       const { question, topK = 5, sessionId } = req.body ?? {}
       if (!question?.trim()) return reply.code(400).send({ error: 'question 必填' })
 
-      // 会话：无 sessionId 则以首问建会话（标题取问题前 24 字）
+      // 会话：无 sessionId（或 sessionId 不属于当前用户）则以首问建新会话
+      // 归属校验：别人的 sessionId 对本用户等同「不存在」，静默新建而非 403，避免泄露会话存在性
       let session = sessionId ? getSession.get(sessionId) : undefined
+      if (session && session.user_id !== req.user.sub) session = undefined
       if (!session) {
         const id = randomUUID()
-        insertSession.run(id, question.slice(0, 24))
+        insertSession.run(id, question.slice(0, 24), req.user.sub)
         session = { id }
       }
 
@@ -81,6 +83,7 @@ export default async function (app) {
       // 观测根 span：一条 trace = 一次问答（Langfuse 经 langfuse.* 属性命名/分组）
       const root = rootSpan('Agentic RAG 问答', {
         'langfuse.session.id': session.id, // 会话分组：同一 session 的 trace 归在一起
+        'langfuse.user.id': req.user.sub,  // 用户分组：Langfuse 按 user 维度聚合
         'input.value': JSON.stringify({ question, topK }).slice(0, 2000),
       })
       const steps = []      // 过程事件存档（落库回放用）

@@ -16,10 +16,13 @@ import Fastify from 'fastify'
 import cors from '@fastify/cors'
 import multipart from '@fastify/multipart' // 文件上传（multipart/form-data）支持
 import rateLimit from '@fastify/rate-limit'
+import jwt from '@fastify/jwt'
 import { config } from './config.js'
 import { ensureCollection } from './rag/qdrant.js'
 import { createIngestWorker } from './rag/ingest.js'
+import { seedUsers } from './auth.js'
 import healthRoutes from './routes/health.js'
+import authRoutes from './routes/auth.js'
 import documentRoutes from './routes/documents.js'
 import chatRoutes from './routes/chat.js'
 import sessionRoutes from './routes/sessions.js'
@@ -42,11 +45,37 @@ await app.register(rateLimit, {
   timeWindow: '1 minute',
 })
 
+// ---- JWT 鉴权 ----
+if (process.env.JWT_SECRET) {
+  app.log.info('[auth] JWT_SECRET 已配置')
+} else {
+  app.log.warn('[auth] JWT_SECRET 未配置，使用开发期兜底密钥——生产必须显式设置！')
+}
+await app.register(jwt, { secret: config.auth.jwtSecret })
+// authenticate 装饰器：校验 Bearer token，成功后 req.user = { sub, username }
+app.decorate('authenticate', async (req, reply) => {
+  try {
+    await req.jwtVerify()
+  } catch {
+    return reply.code(401).send({ error: '未登录或登录已过期，请重新登录' })
+  }
+})
+
+// 预置用户播种：AUTH_USERS → users 表（scrypt 哈希，幂等）
+seedUsers(app.log)
+
 // ---- 业务路由 ----
-app.register(healthRoutes)    // GET  /api/health          健康检查
-app.register(documentRoutes)  // 文档上传 / 列表 / 删除
-app.register(sessionRoutes)   // 会话列表 / 消息回放 / 删除
-app.register(chatRoutes)      // POST /api/chat            SSE 流式问答（核心）
+app.register(healthRoutes)    // GET  /api/health          健康检查（开放，供容器探活）
+app.register(authRoutes)      // POST /api/auth/login      登录（开放，限流单独收紧）
+
+// 受保护路由组：挂 authenticate 钩子，组内所有路由需携带有效 JWT
+const protectedRoutes = async (api) => {
+  api.addHook('preHandler', app.authenticate)
+  api.register(documentRoutes)  // 文档上传 / 列表 / 删除
+  api.register(sessionRoutes)   // 会话列表 / 消息回放 / 删除
+  api.register(chatRoutes)      // POST /api/chat            SSE 流式问答（核心）
+}
+app.register(protectedRoutes)
 
 // 摄取 worker：单并发后台消费 pending 文档
 // 单并发原因：嵌入是 CPU 密集操作（transformers.js），多并发会互相争抢 CPU

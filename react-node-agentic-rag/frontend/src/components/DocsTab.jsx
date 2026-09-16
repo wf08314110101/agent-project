@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { apiFetch } from '../api.js'
 
 const STATUS_META = {
   pending: { text: '排队中', cls: 'st-pending' },
@@ -15,7 +16,7 @@ export default function DocsTab() {
 
   const load = async () => {
     try {
-      const list = await (await fetch('/api/documents')).json()
+      const list = await (await apiFetch('/api/documents')).json()
       setDocs(list)
       // 有未完成的摄取 → 1.5s 后继续轮询，全部就绪/失败即停
       if (list.some((d) => d.status === 'pending' || d.status === 'processing')) {
@@ -39,7 +40,7 @@ export default function DocsTab() {
     try {
       const fd = new FormData()
       fd.append('file', f)
-      const r = await fetch('/api/documents', { method: 'POST', body: fd })
+      const r = await apiFetch('/api/documents', { method: 'POST', body: fd })
       const j = await r.json()
       if (!r.ok) setMsg(`失败: ${j.error}`)
       else if (j.duplicated) setMsg(`内容重复，已跳过: ${j.doc.filename}`)
@@ -53,7 +54,7 @@ export default function DocsTab() {
   }
 
   async function del(id) {
-    const r = await fetch(`/api/documents/${id}`, { method: 'DELETE' })
+    const r = await apiFetch(`/api/documents/${id}`, { method: 'DELETE' })
     if (!r.ok) setMsg(`删除失败: ${(await r.json()).error}`)
     load()
   }

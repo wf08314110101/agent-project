@@ -66,6 +66,22 @@ export const config = {
     windowSize: int('MEMORY_WINDOW', 20), // 回放窗口：最近 N 条原文恒在上下文（+未压缩真空区，零丢失）
   },
 
+  // ---- 鉴权（M5 方案 C：预置用户 + JWT 登录）----
+  auth: {
+    // JWT 签名密钥：生产必须显式配置；缺省时仅给开发期兜底值（启动时会打警告）
+    jwtSecret: env('JWT_SECRET', 'dev-insecure-secret'),
+    // 预置用户清单：'用户名:密码,用户名:密码'，启动时播种进 users 表（密码 scrypt 哈希存储）
+    users: String(env('AUTH_USERS', ''))
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) => {
+        const i = s.indexOf(':')
+        return { username: s.slice(0, i), password: s.slice(i + 1) }
+      })
+      .filter((u) => u.username && u.password),
+  },
+
   // ---- Langfuse 观测（可选）：三项都配置才启用，用于 trace/generation 记录 ----
   langfuse: {
     host: env('LANGFUSE_HOST', ''),

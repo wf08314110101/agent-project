@@ -200,8 +200,15 @@ export default function ChatTab({ askDoc, onClearAsk }) {
                         return (
                           <li key={j} id={`src-${i}-${n}`}>
                             <span className="cite-no">[{n}]</span>
-                            <span className="title">{s.title || s.filename || '无标题'}</span>
-                            <span className="score">{s.score?.toFixed(3)}</span>
+                            {s.url ? (
+                              // 网络兜底来源：标题可点击跳原文，分数位显示来源域名
+                              <a className="title src-web" href={s.url} target="_blank" rel="noreferrer">
+                                🌐 {s.title || s.filename}
+                              </a>
+                            ) : (
+                              <span className="title">{s.title || s.filename || '无标题'}</span>
+                            )}
+                            <span className="score">{s.url ? s.filename : s.score?.toFixed(3)}</span>
                           </li>
                         )
                       })}

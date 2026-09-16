@@ -55,6 +55,8 @@ docker compose up -d backend frontend
 | `HF_ENDPOINT` | hf-mirror.com | 模型下载镜像（国内） |
 | `RETRIEVE_MIN_SCORE` | 0.3 | 稠密路相似度阈值（RRF 融合分不再二次过滤） |
 | `AGENT_MAX_ITERATIONS` / `SEARCH_MAX_ATTEMPTS` | 6 / 2 | 主图轮数上限 / 检索重试上限 |
+| `WEB_SEARCH_PROVIDER` | bing | 网络兜底搜索源：bing（免 key）/ tavily（需 key）/ off（关闭） |
+| `TAVILY_API_KEY` / `WEB_SEARCH_MAX_RESULTS` / `WEB_SEARCH_TIMEOUT_MS` | - / 4 / 8000 | tavily key / 兜底抓取条数 / 单次搜索超时 |
 | `RATE_LIMIT_MAX` / `CHAT_RATE_LIMIT_MAX` | 120 / 20 | 每分钟限流 |
 | `FALLBACK_DIRECT` | true | 知识库为空时通用知识直答（注明） |
 | `MEMORY_WINDOW` | 20 | 会话窗口条数（更早消息滚动摘要压缩） |

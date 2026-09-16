@@ -4,14 +4,16 @@
 // 流程：retrieve（向量检索）→ grade（LLM 相关性评估）
 //         → 足够 → END（hits 已过滤为相关子集）
 //         → 不足且未超 attempts → rewrite（LLM 改写查询）→ retrieve（重检）
-//         → 不足且超 attempts   → END（带现有结果返回，宁滥勿缺）
-// 设计目标：通过"评估-改写-重试"的有界循环提升召回质量，同时防止无限重试。
+//         → 不足且超 attempts、未联网兜底过 → web_search（网络搜索）→ grade（复用评估过滤）
+//         → 不足且超 attempts、已兜底 / 兜底关闭 → END（带现有结果返回，宁滥勿缺）
+// 设计目标：通过"评估-改写-重试-联网"的有界漏斗提升召回质量，同时防止无限重试。
 // ============================================================================
 
 import { StateGraph, Annotation, START, END } from '@langchain/langgraph'
 import { createHash } from 'node:crypto'
 import { embedOne } from '../rag/embedder.js'
 import { hybridSearch } from '../rag/qdrant.js'
+import { webSearch, webSearchAvailable } from '../rag/websearch.js'
 import { chatStructured } from '../llm.js'
 import { config } from '../config.js'
 import { gradeMessages, rewriteMessages, GRADE_SCHEMA, REWRITE_SCHEMA } from './prompts.js'
@@ -25,6 +27,8 @@ const SearchState = Annotation.Root({
   hits: Annotation({ reducer: (_, y) => y, default: () => [] }),      // 检索+过滤后的资料块
   enough: Annotation({ reducer: (_, y) => y, default: () => false }), // 评估结论：材料是否足够
   feedback: Annotation({ reducer: (_, y) => y, default: () => '' }),  // 评估反馈（缺什么），喂给改写节点
+  webEligible: Annotation({ reducer: (_, y) => y, default: () => false }), // 允许联网兜底（gradeNode 写入，供路由判读）
+  webTried: Annotation({ reducer: (_, y) => y, default: () => false }),    // 已联网兜底过（每轮最多一次）
 })
 
 // 检索：多查询并发 → 混合检索（稠密+稀疏 RRF）→ 合并去重（同块保留最高分）→ 截断 topK
@@ -132,7 +136,9 @@ async function gradeNode(state, cfg) {
     label: '评估',
     content: `${cached ? '⚡ 评估（缓存命中）' : enough ? '✅ 材料充足' : '⚠️ 材料不足'}：保留 ${hits.length}/${state.hits.length}${feedback ? `（${feedback}）` : ''}`,
   })
-  return { hits, enough, feedback }
+  // webEligible 写入状态供路由判读（路由函数保持只读 state，不读 cfg）：
+  // 指定文档范围（docId）不联网兜底——用户明确限定了资料边界，混入网络内容反而污染答案
+  return { hits, enough, feedback, webEligible: !c.docId && webSearchAvailable() }
 }
 
 // 改写：材料不足时换 2 个问法重检（返回形状由 REWRITE_SCHEMA 经 tool-call 强制）
@@ -162,18 +168,58 @@ async function rewriteNode(state, cfg) {
   return { queries: finalQueries, attempts: state.attempts + 1 }
 }
 
-// 条件路由：材料不足且还有重试额度 → rewrite；否则结束
-// searchMaxAttempts 默认 2，即最多"改写→重检"2 次，防止无限循环烧 token
-const shouldRetry = (state) =>
-  !state.enough && state.attempts < config.agent.searchMaxAttempts ? 'rewrite' : END
+// 网络兜底：重试额度用尽仍不足 → 联网搜索一次，结果并入资料后再过一遍 grade 过滤
+const hostOf = (u) => {
+  try { return new URL(u).hostname } catch { return '' }
+}
+async function webSearchNode(state, cfg) {
+  const c = cfg?.configurable ?? {}
+  c.emit?.('step', {
+    phase: 'thought',
+    label: '联网兜底',
+    content: `知识库资料不足，联网搜索「${state.question}」`,
+  })
+  const results = await webSearch(state.question, { signal: c.signal, count: config.webSearch.maxResults })
+  c.emit?.('step', {
+    phase: 'observation',
+    label: '联网搜索',
+    content: results.length
+      ? `命中 ${results.length} 条网络结果，与库内资料合并后重新评估`
+      : '网络搜索无结果或失败，基于已有资料/通用知识回答',
+  })
+  // 网络结果转成与知识库块同形的 hit：docId='web:URL' 保证引用键全局唯一（citeMap/合并不碰撞）；
+  // score 置 0（无相似度语义，前端不展示），url 字段标识网络来源
+  const webHits = results.map((r) => ({
+    docId: `web:${r.url}`,
+    chunkIndex: 0,
+    url: r.url,
+    title: r.title,
+    text: r.snippet,
+    filename: hostOf(r.url),
+    score: 0,
+  }))
+  return { webTried: true, hits: [...state.hits, ...webHits] }
+}
 
-// ---- 编译子图：retrieve → grade →（条件）rewrite → retrieve ----
+// 条件路由（只读 state，不读 cfg；webEligible 已由 gradeNode 写入状态）：
+//   足够 → END；不足且有重试额度 → rewrite；额度用尽且未联网兜底 → web_search；否则 END
+// searchMaxAttempts 默认 2，即最多"改写→重检"2 次，防止无限循环烧 token
+const shouldRetry = (state) => {
+  if (state.enough) return END
+  if (state.attempts < config.agent.searchMaxAttempts) return 'rewrite'
+  if (state.webEligible && !state.webTried) return 'web_search'
+  return END
+}
+
+// ---- 编译子图：retrieve → grade →（条件）rewrite / web_search → grade → END ----
 export const searchGraph = new StateGraph(SearchState)
   .addNode('retrieve', retrieveNode)
   .addNode('grade', gradeNode)
   .addNode('rewrite', rewriteNode)
+  .addNode('web_search', webSearchNode)
   .addEdge(START, 'retrieve')
   .addEdge('retrieve', 'grade')
   .addConditionalEdges('grade', shouldRetry)
   .addEdge('rewrite', 'retrieve')
+  .addEdge('web_search', 'grade') // 网络结果并入资料后复用评估节点过滤
   .compile()

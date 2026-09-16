@@ -109,6 +109,8 @@ main { margin-top: 16px; }
 .sources .cite-no { color: var(--brand); font-weight: 600; margin-right: 6px; font-variant-numeric: tabular-nums; }
 .sources .title { margin-right: 8px; }
 .sources .score { color: var(--muted); font-variant-numeric: tabular-nums; }
+.sources a.src-web { color: var(--brand); text-decoration: none; }
+.sources a.src-web:hover { text-decoration: underline; }
 
 /* 行内引用锚点：正文里的 [n] 上标徽标，可点击跳转来源 */
 .content .cite {

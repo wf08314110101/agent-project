@@ -94,14 +94,17 @@ export async function runTool(name, args, cfg) {
       // sources 事件：把最终命中资料推给前端做引用展示
       cfg?.configurable?.emit?.('sources', { sources: res.hits })
       if (!res.hits.length) return `知识库中没有找到与「${args.question}」相关的资料。`
-      // 把命中块拼成带全局编号+相似度的资料文本，编号即回答中 [n] 的取值来源
+      // 把命中块拼成带全局编号+相似度的资料文本，编号即回答中 [n] 的取值来源；
+      // 网络兜底命中带 url，以「(网络)」标注并附来源 URL（无相似度语义）
+      const webN = res.hits.filter((h) => h.url).length
       const body = res.hits
-        .map(
-          (h, i) =>
-            `[${h.cite}] (相似度 ${h.score.toFixed(3)}) ${h.filename}${h.title ? ' · ' + h.title : ''}\n${h.text}`
+        .map((h) =>
+          h.url
+            ? `[${h.cite}] (网络) ${h.title || h.filename}\n${h.text}\n来源: ${h.url}`
+            : `[${h.cite}] (相似度 ${h.score.toFixed(3)}) ${h.filename}${h.title ? ' · ' + h.title : ''}\n${h.text}`
         )
         .join('\n\n')
-      return `检索到 ${res.hits.length} 条资料（材料${res.enough ? '充足' : '有限'}；引用编号 [n] 为全局唯一，回答中原样使用）:\n\n${body}`
+      return `检索到 ${res.hits.length} 条资料（材料${res.enough ? '充足' : '有限'}${webN ? `，其中 ${webN} 条来自联网兜底` : ''}；引用编号 [n] 为全局唯一，回答中原样使用）:\n\n${body}`
     }
     case 'calculator':
       return calc(String(args.expression ?? ''))

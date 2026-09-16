@@ -128,7 +128,8 @@ const cases = [
     q: '请用一句话介绍量子纠缠',
     check: (r) => {
       ok(r.answer.length > 5, '应给出回答')
-      if (r.sources.length > 0) {
+      // 网络兜底来源带 url，属真实资料引用，无需「通用知识」标注；仅库内资料需注明
+      if (r.sources.length > 0 && !r.sources.some((s) => s.url)) {
         ok(/通用知识|知识库/.test(r.answer), '引用来源时必须注明非知识库内容')
       }
     },

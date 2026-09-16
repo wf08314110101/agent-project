@@ -61,6 +61,14 @@ export const config = {
     searchMaxAttempts: int('SEARCH_MAX_ATTEMPTS', 2), // search_kb 子图最大"改写→重检"尝试次数
   },
 
+  // ---- 网络搜索兜底（CRAG：库内重试额度用尽仍不足时联网补救）----
+  webSearch: {
+    provider: env('WEB_SEARCH_PROVIDER', 'bing'), // bing（免 key 抓取）| tavily（需 key）| off（关闭兜底）
+    tavilyKey: env('TAVILY_API_KEY', ''),         // tavily provider 的 API Key
+    maxResults: int('WEB_SEARCH_MAX_RESULTS', 4), // 兜底抓取条数（并入资料后仍过 grade 过滤）
+    timeoutMs: int('WEB_SEARCH_TIMEOUT_MS', 8000), // 单次搜索超时（超时/失败降级为无兜底资料）
+  },
+
   // ---- 长会话记忆压缩 ----
   memory: {
     windowSize: int('MEMORY_WINDOW', 20), // 回放窗口：最近 N 条原文恒在上下文（+未压缩真空区，零丢失）

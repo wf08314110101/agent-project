@@ -26,12 +26,13 @@ export const llm = new OpenAI({
  *   - toolChoice  : 'none' 等强制策略（如超轮数时禁用工具）
  *   - signal      : AbortSignal，客户端断开时中断上游请求
  *   - onDelta     : 每收到一段正文 token 的回调（用于 SSE 转发给前端）
+ *   - onReason    : 每收到一段思维链 token 的回调（deepseek-reasoner 等模型的 reasoning_content）
  *   - temperature : 采样温度，默认 0（RAG 场景要稳定，不要发散）
  * @returns {{ message: object, usage: object|null }}
  *   message 为拼装完整的 assistant 消息（含 tool_calls 时一并带回）；
  *   usage 为 token 用量统计（stream_options 开启后最后一个 chunk 会携带）
  */
-export async function chatStream(messages, { tools, toolChoice, signal, onDelta, temperature = 0 } = {}) {
+export async function chatStream(messages, { tools, toolChoice, signal, onDelta, onReason, temperature = 0 } = {}) {
   // 发起流式请求；`...(tools?.length && { tools })` 为条件展开：无工具时不多传字段
   const stream = await llm.chat.completions.create(
     {
@@ -47,10 +48,15 @@ export async function chatStream(messages, { tools, toolChoice, signal, onDelta,
   )
 
   let content = ''    // 正文增量累积
+  let reasoning = ''  // 思维链增量累积（与正文分通道，前端单独折叠展示）
   let usage = null    // token 用量（最后一个 chunk 携带）
   let toolCalls = []  // 按索引槽位累积的工具调用
   for await (const chunk of stream) {
     const d = chunk.choices?.[0]?.delta
+    if (d?.reasoning_content) {
+      reasoning += d.reasoning_content
+      onReason?.(d.reasoning_content) // Thought 独立流式通道，不混入正文 delta
+    }
     if (d?.content) {
       content += d.content
       onDelta?.(d.content) // 边收边转发，前端实现打字机效果
@@ -72,6 +78,7 @@ export async function chatStream(messages, { tools, toolChoice, signal, onDelta,
 
   // 拼装最终 assistant 消息：有工具调用则挂上 tool_calls，无正文则置 null（符合 OpenAI 规范）
   const message = { role: 'assistant', content: content || null }
+  if (reasoning) message.reasoning_content = reasoning // 带回思维链（不回传上游，仅供观测）
   if (toolCalls.length) message.tool_calls = toolCalls
   return { message, usage }
 }

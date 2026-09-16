@@ -7,6 +7,7 @@
 // ============================================================================
 
 import fs from 'node:fs/promises'
+import { EventEmitter } from 'node:events'
 import { parseFile } from './parser.js'
 import { chunkText } from './chunker.js'
 import { embed } from './embedder.js'
@@ -20,6 +21,14 @@ import {
 } from '../store/sqlite.js'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+// 摄取进度事件总线：worker 发 doc 事件，SSE 端点订阅后推给前端（替代轮询）
+// 事件形状：{ id, filename, user_id, status, progress, chunks?, error? }
+export const ingestBus = new EventEmitter()
+ingestBus.setMaxListeners(50) // SSE 订阅者随在线用户数增长，放宽默认 10 的告警阈值
+
+// 嵌入批大小：CPU 密集，小批多次既保内存可控，又给进度事件提供上报粒度
+const EMBED_BATCH = 16
 
 /**
  * 创建摄取 worker（工厂函数，便于在 server.js 与 documents 路由中各自实例化/唤醒）
@@ -44,24 +53,38 @@ export function createIngestWorker(log) {
    */
   async function processDoc(doc) {
     setDocStatus.run('processing', null, doc.id) // 先占坑，防止重复消费
+    // 进度上报：解析前 5%，解析完 15%，按嵌入批次推进到 90%，入库后 100%
+    const report = (status, progress, extra = {}) =>
+      ingestBus.emit('doc', { id: doc.id, filename: doc.filename, user_id: doc.user_id, status, progress, ...extra })
+    report('processing', 5)
     try {
       const buf = await fs.readFile(doc.path)
       const text = await parseFile(doc.filename, buf)
       if (!text?.trim()) throw new Error('解析结果为空') // 扫描版 PDF 等场景
 
       const chunks = chunkText(text)
+      report('processing', 15, { total: chunks.length })
       // 嵌入输入 = 标题 + 正文拼接：标题提供章节上下文，提升向量语义质量
-      const vectors = await embed(chunks.map((c) => (c.title ? `${c.title}\n${c.text}` : c.text)))
+      // 分批嵌入：每批结束上报一次进度（SSE 实时推送），避免长文档全程无反馈
+      const vectors = []
+      for (let i = 0; i < chunks.length; i += EMBED_BATCH) {
+        vectors.push(
+          ...await embed(chunks.slice(i, i + EMBED_BATCH).map((c) => (c.title ? `${c.title}\n${c.text}` : c.text)))
+        )
+        report('processing', Math.min(90, 15 + Math.round(((i + EMBED_BATCH) / Math.max(1, chunks.length)) * 75)))
+      }
       await ensureCollection() // 幂等：集合不存在则创建
       const n = await indexChunks({ docId: doc.id, filename: doc.filename, chunks, vectors })
 
       setDocChunks.run(n, doc.id)
       setDocStatus.run('ready', null, doc.id)
       await fs.rm(doc.path, { force: true }) // 原件用完即删（省磁盘）
+      report('ready', 100, { chunks: n })
       log?.info?.(`[ingest] ${doc.filename} → ready（${n} 块）`)
     } catch (e) {
       // 失败落库：状态 + 错误信息都记录，前端可见原因
       setDocStatus.run('failed', e.message, doc.id)
+      report('failed', 0, { error: e.message })
       log?.error?.(`[ingest] ${doc.filename} 失败: ${e.message}`)
     }
   }

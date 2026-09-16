@@ -10,7 +10,7 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { ACCEPT_EXT, hashBuffer } from '../rag/parser.js'
-import { createIngestWorker } from '../rag/ingest.js'
+import { createIngestWorker, ingestBus } from '../rag/ingest.js'
 import { insertDoc, listDocsByUser, getDoc, getDocByHash, deleteDocRow } from '../store/sqlite.js'
 import { deleteDocPoints } from '../rag/qdrant.js'
 import { config } from '../config.js'
@@ -65,8 +65,32 @@ export default async function (app) {
     }
   })
 
-  // 文档列表：当前用户自己的，按创建时间倒序，含 status/chunks/error，前端轮询渲染
+  // 文档列表：当前用户自己的，按创建时间倒序，含 status/chunks/error
   app.get('/api/documents', (req) => listDocsByUser.all(req.user.sub))
+
+  // 摄取进度 SSE：连接即推一帧全量快照（docs 事件），之后订阅 worker 的 doc 事件实时推送
+  // 替代前端 1.5s 轮询；仅推本人文档（事件带 user_id，订阅侧过滤）。nginx 反代需 x-accel-buffering: no
+  app.get('/api/documents/events', (req, reply) => {
+    reply.raw.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    })
+    const send = (event, data) => reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+    send('docs', { docs: listDocsByUser.all(req.user.sub) }) // 快照：前端连接后无需再拉一次列表
+
+    const onDoc = (d) => {
+      if (d.user_id !== req.user.sub) return // 只推本人文档
+      send('doc', d)
+    }
+    ingestBus.on('doc', onDoc)
+    const ping = setInterval(() => reply.raw.write(': ping\n\n'), 25_000) // 心跳防代理断长连接
+    req.raw.on('close', () => {
+      clearInterval(ping)
+      ingestBus.off('doc', onDoc)
+    })
+  })
 
   // 删除文档：只在"非摄取中"时允许；仅限本人文档；顺序 = 原件 → 向量 → 元数据行
   app.delete('/api/documents/:id', async (req, reply) => {

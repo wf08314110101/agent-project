@@ -1,4 +1,4 @@
-{"question": "系统的检索用的是什么模式？为什么比纯向量检索好", "expect": ["RRF", "倒数排名融合", "混合检索"], "answer_must": ["RRF"], "note": "技术/主指标题"}
+{"question": "Agentic RAG 系统的检索用的是什么模式？为什么比纯向量检索好", "expect": ["RRF", "倒数排名融合", "混合检索"], "answer_must": ["RRF"], "note": "技术/主指标题（指名系统，与旧版基线竞争文档区分）"}
 {"question": "CRAG 模式下改写查询最多重试几次", "expect": ["最多尝试 2 次", "改写查询后重新检索"], "answer_must": ["2"], "note": "数字事实"}
 {"question": "评估缓存为什么不会因为删文档而读到脏数据", "expect": ["文本哈希", "内容寻址", "增删文档"], "note": "原理题"}
 {"question": "Agent 内置了哪些工具", "expect": ["search_knowledge", "calculator", "get_current_time"], "answer_must": ["search_knowledge", "calculator"], "note": "枚举题"}
@@ -24,3 +24,11 @@
 {"question": "万能干料的配比是什么", "expect": ["孜然粉", "辣椒面", "4 比 3"], "note": "配比数字"}
 {"question": "向量数据库的混合检索要怎么做", "expect": ["RRF", "稠密", "稀疏"], "expect_none": ["腌制", "火候", "蘸料"], "note": "负向：技术题不得混入烧烤块"}
 {"question": "出差的发票丢失了还能报销吗", "expect": ["30 天", "发票"], "expect_none": ["孜然", "腌制"], "note": "负向：制度题不得混入烧烤块"}
+{"question": "旧版 Python 检索基线的改写重试上限是几次", "expect": ["最多尝试 3 次"], "answer_must": ["3 次"], "note": "竞争文档区分：同域话题不同数字"}
+{"question": "新旧两套 RAG 系统的检索重试上限各是多少", "expect": ["最多尝试 2 次", "最多尝试 3 次"], "note": "多跳对比：需同时命中两个文档的块"}
+{"question": "单路 RAG 基线相比 Agentic RAG 缺少了哪些能力", "expect": ["稀疏关键词", "工具调用", "评估结果缓存"], "note": "对比题：竞争文档干扰下取基线内容"}
+{"question": "数据平台负责人所在的部门今年预算是多少", "expect": ["李四", "320 万"], "answer_must": ["320 万"], "note": "多跳：人员→部门→预算跨块拼接"}
+{"question": "会议纪要里谁负责数据平台的研发", "expect": ["李四"], "answer_must": ["李四"], "note": "人名锚点"}
+{"question": "平台工程部预算里划拨给数据平台专项的是多少", "expect": ["180 万"], "answer_must": ["180 万"], "note": "数字（同块 320 万干扰）"}
+{"question": "数据平台一期交付的验收标准是什么", "expect": ["日均检索请求 10 万次", "P95 延迟低于 200 毫秒"], "note": "多要点"}
+{"question": "数据平台技术评审会定在什么时候", "expect": ["下周四", "3 号会议室"], "expect_none": ["孜然", "腌制", "RRF"], "note": "负向：纪要题不得混入烧烤/技术块"}

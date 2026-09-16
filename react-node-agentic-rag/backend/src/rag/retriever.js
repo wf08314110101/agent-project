@@ -13,11 +13,12 @@ import { hybridSearch } from './qdrant.js'
  * 检索：query 向量化 → Qdrant 混合检索（稠密语义 + 稀疏关键词 RRF 融合）
  * @param {string}  question - 自然语言问题
  * @param {number}  topK     - 检索条数（默认 5）
+ * @param {string}  [docId]  - 指定文档过滤（调试口/评估用），空则检索全库
  * @returns {Promise<Array>} 命中块（阈值已在稠密路 prefetch 服务端应用；
  *          融合分为排名分，不再二次过滤）
  */
-export async function retrieve(question, topK = 5) {
+export async function retrieve(question, topK = 5, docId) {
   const vector = await embedOne(question)
-  const { hits } = await hybridSearch({ text: question, vector, limit: topK })
+  const { hits } = await hybridSearch({ text: question, vector, limit: topK, docId })
   return hits
 }

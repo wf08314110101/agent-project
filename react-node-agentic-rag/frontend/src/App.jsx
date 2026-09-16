@@ -8,6 +8,8 @@ export default function App() {
   // 登录态：localStorage有 token 即视为已登录（token 过期由 api 层 401 统一兜底）
   const [user, setUser] = useState(() => (getToken() ? localStorage.getItem('agr_user') || '已登录' : null))
   const [tab, setTab] = useState('chat')
+  // 指定文档问答：DocsTab「提问」→ 记录目标文档并切到对话 Tab，ChatTab 挂检索范围徽标
+  const [askDoc, setAskDoc] = useState(null)
 
   useEffect(() => {
     // api 层遇 401 会清 token 并回调这里 → 切回登录页
@@ -40,7 +42,13 @@ export default function App() {
           <button className="logout-btn" onClick={logout}>退出</button>
         </span>
       </header>
-      <main>{tab === 'chat' ? <ChatTab /> : <DocsTab />}</main>
+      <main>
+        {tab === 'chat' ? (
+          <ChatTab askDoc={askDoc} onClearAsk={() => setAskDoc(null)} />
+        ) : (
+          <DocsTab onAsk={(doc) => { setAskDoc(doc); setTab('chat') }} />
+        )}
+      </main>
     </div>
   )
 }

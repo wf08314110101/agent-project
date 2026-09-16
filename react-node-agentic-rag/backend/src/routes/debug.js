@@ -15,9 +15,10 @@ export default async function (app) {
     const q = String(req.query.q ?? '').trim()
     if (!q) return reply.code(400).send({ error: 'q 必填' })
     const topK = Math.min(Number(req.query.topK) || 5, 20) // 上限 20，防滥用拉全库
+    const docId = String(req.query.docId ?? '').trim() || undefined // 可选：单文档范围观测
 
     const started = Date.now()
-    const hits = await retrieve(q, topK)
+    const hits = await retrieve(q, topK, docId)
     return {
       query: q,
       topK,

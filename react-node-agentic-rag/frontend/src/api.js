@@ -29,19 +29,8 @@ export async function apiFetch(url, opts = {}) {
   return res
 }
 
-// SSE 流式问答：POST + ReadableStream 手动解析（EventSource 不支持 POST/自定义头）
-export async function streamChat({ question, topK, sessionId, signal, onEvent }) {
-  const res = await apiFetch('/api/chat', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ question, topK, sessionId }),
-    signal,
-  })
-  if (!res.ok) {
-    const j = await res.json().catch(() => ({}))
-    throw new Error(j.error || `HTTP ${res.status}`)
-  }
-
+// SSE 帧解析（chat / 文档进度共用）：从 ReadableStream 按 \n\n 切帧回调 onEvent(event, data)
+async function consumeSSE(res, onEvent) {
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
   let buf = ''
@@ -61,6 +50,28 @@ export async function streamChat({ question, topK, sessionId, signal, onEvent })
       if (ev.event) onEvent(ev.event, ev.data)
     }
   }
+}
+
+// SSE 流式问答：POST + ReadableStream 手动解析（EventSource 不支持 POST/自定义头）
+export async function streamChat({ question, topK, sessionId, docId, signal, onEvent }) {
+  const res = await apiFetch('/api/chat', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ question, topK, sessionId, ...(docId ? { docId } : {}) }),
+    signal,
+  })
+  if (!res.ok) {
+    const j = await res.json().catch(() => ({}))
+    throw new Error(j.error || `HTTP ${res.status}`)
+  }
+  await consumeSSE(res, onEvent)
+}
+
+// 文档摄取进度流：GET SSE，docs=全量快照 / doc=单文档状态变化（替代轮询）
+export async function streamDocEvents({ signal, onEvent }) {
+  const res = await apiFetch('/api/documents/events', { signal })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  await consumeSSE(res, onEvent)
 }
 
 // 登录：成功即存 token，返回用户名

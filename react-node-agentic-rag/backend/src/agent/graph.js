@@ -42,12 +42,13 @@ async function agentNode(state, cfg) {
     'input.value': JSON.stringify(messages).slice(0, 2000), // 截断防止 span 过大
   })
 
-  // 流式调用：onDelta 把正文 token 实时转发给前端（打字机效果）
+  // 流式调用：正文 token 走 delta 事件（打字机效果），思维链 token 走独立 reasoning 事件
   const { message, usage } = await chatStream(messages, {
     tools: force ? undefined : toolDefs,
     toolChoice: force ? 'none' : undefined, // 超轮数：强制直接作答
     signal: c.signal,
     onDelta: (text) => c.emit?.('delta', { text }),
+    onReason: (text) => c.emit?.('reasoning', { text }),
   })
 
   // 累计每轮 usage，路由层最后统一汇总；span 记录输出与 token 用量
@@ -178,9 +179,10 @@ export const agentGraph = new StateGraph(AgentState)
  * @param {number} topK     - 检索条数，透传给 search_kb 子图
  * @param {AbortSignal} signal - 客户端断开时中断 LLM 请求
  * @param {Function} emit   - SSE 事件发射器 (event, data)
- * @param {Array}   usageAcc- usage 累积数组，路由层最后汇总
+ * @param {Array}  usageAcc- usage 累积数组，路由层最后汇总
+ * @param {string} [docId] - 指定文档检索范围（「对此文档提问」），空则检索全库
  */
-export function runAgent({ messages, topK = 5, signal, emit, usageAcc }) {
+export function runAgent({ messages, topK = 5, signal, emit, usageAcc, docId }) {
   return agentGraph.invoke(
     { messages, stepCount: 0 },
     {
@@ -189,6 +191,7 @@ export function runAgent({ messages, topK = 5, signal, emit, usageAcc }) {
         signal,
         usageAcc,
         topK,
+        docId: docId || undefined, // 贯穿到 search_kb 子图的 retrieveNode（payload 过滤）
         actionLog: new Map(), // 重复 Action 检测缓存（每次 invoke 独立，跨请求不共享）
       },
     }

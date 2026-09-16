@@ -72,6 +72,7 @@ export async function indexChunks({ docId, filename, chunks, vectors }) {
   })
   // 1.13+ 客户端：upsert 需用 { points: [...] } 包装；wait:true 确保写入可见再继续
   await qdrant.upsert(config.qdrantCollection, { points }, { wait: true })
+  invalidateCount() // 点数变化：空库降级预判的计数缓存立即失效
   return points.length
 }
 
@@ -81,11 +82,14 @@ export async function indexChunks({ docId, filename, chunks, vectors }) {
  * @param {string}   p.text    - 查询原文（分词构建稀疏向量）
  * @param {number[]} p.vector  - 查询稠密向量（已归一化）
  * @param {number}   p.limit   - 返回条数（默认 5）
+ * @param {string}   [p.docId] - 指定文档过滤（「对此文档提问」），空则检索全库
  * @returns {Promise<{hits: Array, mode: string}>} 融合后 topK；
  *          mode = 'hybrid-rrf' | 'dense-fallback'（稀疏路故障时退化，阈值语义回到余弦分）
  */
-export async function hybridSearch({ text, vector, limit = 5 }) {
+export async function hybridSearch({ text, vector, limit = 5, docId }) {
   const k = prefetchLimit(limit)
+  // docId 范围过滤：挂顶层 filter（融合后生效），两路 prefetch 天然都被约束
+  const scope = docId ? { filter: { must: [{ key: 'docId', match: { value: docId } }] } } : {}
   try {
     const { points: hits } = await qdrant.query(config.qdrantCollection, {
       prefetch: [
@@ -97,6 +101,7 @@ export async function hybridSearch({ text, vector, limit = 5 }) {
       query: { fusion: 'rrf' }, // 倒数排名融合：score = Σ 1/(60+rank)，只代表融合排名
       limit,
       with_payload: true, // 命中必须带 payload 才能拼装引用
+      ...scope,
     })
     return { mode: 'hybrid-rrf', hits: hits.map((h) => ({ score: h.score, ...h.payload })) }
   } catch (e) {
@@ -106,6 +111,7 @@ export async function hybridSearch({ text, vector, limit = 5 }) {
       query: vector,
       limit,
       with_payload: true,
+      ...scope,
     })
     return {
       mode: 'dense-fallback',
@@ -123,13 +129,22 @@ export async function deleteDocPoints(docId) {
     filter: { must: [{ key: 'docId', match: { value: docId } }] },
     wait: true,
   })
+  invalidateCount() // 点数变化：空库降级预判的计数缓存立即失效
 }
 
 /**
- * 统计集合内点数（精确计数）：用于判断知识库是否为空，
+ * 统计集合内点数（精确计数 + 30s TTL 缓存）：用于判断知识库是否为空，
  * chat 路由据此做降级预判（空库直接让 LLM 直答，省掉无意义的检索轮）。
+ * 缓存是纯优化层：每次问答省一次 Qdrant 往返；写操作（入库/删向量）立即失效，
+ * 保证"空库判断"在摄取完成后最多延迟 TTL 秒收敛。
  */
+let countCache = { v: null, at: 0 }
+const COUNT_TTL_MS = 30_000
+const invalidateCount = () => { countCache = { v: null, at: 0 } }
+
 export async function countPoints() {
+  if (countCache.v !== null && Date.now() - countCache.at < COUNT_TTL_MS) return countCache.v
   const { count } = await qdrant.count(config.qdrantCollection, { exact: true })
+  countCache = { v: count, at: Date.now() }
   return count
 }

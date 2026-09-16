@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { apiFetch } from '../api.js'
+import { apiFetch, streamDocEvents } from '../api.js'
 
 const STATUS_META = {
   pending: { text: '排队中', cls: 'st-pending' },
@@ -8,7 +8,7 @@ const STATUS_META = {
   failed: { text: '失败', cls: 'st-failed' },
 }
 
-export default function DocsTab() {
+export default function DocsTab({ onAsk }) {
   const [docs, setDocs] = useState([])
   const [msg, setMsg] = useState('')
   const [uploading, setUploading] = useState(false)
@@ -16,20 +16,48 @@ export default function DocsTab() {
 
   const load = async () => {
     try {
-      const list = await (await apiFetch('/api/documents')).json()
-      setDocs(list)
-      // 有未完成的摄取 → 1.5s 后继续轮询，全部就绪/失败即停
-      if (list.some((d) => d.status === 'pending' || d.status === 'processing')) {
-        clearTimeout(timerRef.current)
-        timerRef.current = setTimeout(load, 1500)
-      }
+      setDocs(await (await apiFetch('/api/documents')).json())
     } catch (e) {
       setMsg(`加载失败: ${e.message}`)
     }
   }
+
+  // SSE 兜底轮询：进度流断开/不可用时，退回 1.5s 轮询直到无未完成文档
+  // （用刚拉到的 list 判断续跑，避免闭包里 docs 状态过期）
+  const startPolling = () => {
+    clearTimeout(timerRef.current)
+    timerRef.current = setTimeout(async () => {
+      try {
+        const list = await (await apiFetch('/api/documents')).json()
+        setDocs(list)
+        if (list.some((d) => d.status === 'pending' || d.status === 'processing')) startPolling()
+      } catch {
+        startPolling()
+      }
+    }, 1500)
+  }
+
   useEffect(() => {
-    load()
-    return () => clearTimeout(timerRef.current)
+    let stop = false
+    const ctrl = new AbortController()
+    load() // 首屏直拉一次（SSE 快照随后到达，幂等）
+    // 摄取进度订阅：docs=全量快照 / doc=单文档状态变化（含 progress 百分比）
+    streamDocEvents({
+      signal: ctrl.signal,
+      onEvent: (ev, d) => {
+        if (stop) return
+        if (ev === 'docs') setDocs(d.docs)
+        else if (ev === 'doc') {
+          setDocs((list) =>
+            list.some((x) => x.id === d.id)
+              ? list.map((x) => (x.id === d.id ? { ...x, ...d, error: d.error ?? x.error } : x))
+              : load() // 未知文档（本端列表滞后）→ 直接刷新
+          )
+        }
+      },
+    }).catch(() => { if (!stop) startPolling() }) // SSE 失败 → 轮询兜底
+    return () => { stop = true; ctrl.abort(); clearTimeout(timerRef.current) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   async function upload(e) {
@@ -44,7 +72,7 @@ export default function DocsTab() {
       const j = await r.json()
       if (!r.ok) setMsg(`失败: ${j.error}`)
       else if (j.duplicated) setMsg(`内容重复，已跳过: ${j.doc.filename}`)
-      else load() // 202 已入队，启动轮询
+      else load() // 202 已入队，进度由 SSE 推送
     } catch (err) {
       setMsg(`失败: ${err.message}`)
     } finally {
@@ -89,12 +117,22 @@ export default function DocsTab() {
                 <td>
                   <span className={`doc-status ${st.cls}`} title={d.error || ''}>
                     {st.text}
-                    {d.status === 'processing' && ' …'}
+                    {d.status === 'processing' && d.progress != null ? ` ${d.progress}%` : ' …'}
                   </span>
                 </td>
                 <td>{d.status === 'ready' ? d.chunks : '-'}</td>
                 <td>{d.created_at}</td>
-                <td><button className="del" onClick={() => del(d.id)}>删除</button></td>
+                <td className="row-actions">
+                  <button
+                    className="ask"
+                    disabled={d.status !== 'ready'}
+                    title={d.status === 'ready' ? `仅检索《${d.filename}》进行问答` : '仅就绪文档可提问'}
+                    onClick={() => onAsk?.(d)}
+                  >
+                    提问
+                  </button>
+                  <button className="del" onClick={() => del(d.id)}>删除</button>
+                </td>
               </tr>
             )
           })}

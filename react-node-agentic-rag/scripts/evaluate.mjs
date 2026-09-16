@@ -5,7 +5,9 @@
 //   node scripts/evaluate.mjs                          # 全量（检索 + 答案两层）
 //   node scripts/evaluate.mjs --layer retrieval        # 只跑检索层（零 LLM 成本，秒级）
 //   node scripts/evaluate.mjs --baseline evals/results/x.json   # 与基线对比
-// 数据：evals/golden.jsonl（26 题）+ evals/fixtures/*（6 文档，自动上传，幂等）
+//   node scripts/evaluate.mjs --layer retrieval --assert "recall>=0.85,mrr>=0.7,purity=1"  # 阈值门禁（CI）
+//   node scripts/evaluate.mjs --detail                 # 逐题明细（失分归因定位）
+// 数据：evals/golden.jsonl（34 题）+ evals/fixtures/*（8 文档，自动上传，幂等）
 // 指标：
 //   检索层  recall@k = 期望特征被 topK 命中覆盖的比例；MRR = 首个期望块排名倒数；
 //           purity = 负向断言（expect_none 干扰关键词不得出现在命中里）通过率
@@ -28,6 +30,9 @@ const arg = (k, d) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] :
 const LAYER = arg('--layer', 'all') // all | retrieval | answer
 const BASELINE = arg('--baseline', null)
 const TOPK = Number(arg('--topK', 5))
+const DETAIL = argv.includes('--detail') // 逐题明细打印（失分归因定位用）
+// 阈值门禁（CI 用），如 --assert "recall>=0.85,mrr>=0.7,purity=1"，任一不达标退出码 1
+const ASSERT = arg('--assert', null)
 
 if (!['all', 'retrieval', 'answer'].includes(LAYER)) {
   console.error('--layer 只支持 all | retrieval | answer')
@@ -141,8 +146,8 @@ const judgeLLM = (() => {
 })()
 
 const faithfulnessPrompt = (answer, sources) => [
-  { role: 'system', content: '你是严格的答案忠实度评估器。判断「回答」中的每个事实性论断是否都能在「参考资料」中找到依据。回答里来自通用知识且参考资料未覆盖的内容，算作不忠实（unfaithful）。只输出 JSON。' },
-  { role: 'user', content: `参考资料：\n${sources.map((s, i) => `[${i + 1}] ${s.text?.slice(0, 500)}`).join('\n') || '(无来源)'}\n\n回答：\n${answer}\n\n输出 {"score": 0到1的小数, "issues": ["不忠实论断列表"]}` },
+  { role: 'system', content: '你是严格的答案忠实度评估器。判断「回答」中的每个事实性论断是否都能在「参考资料」中找到依据。回答里来自通用知识且参考资料未覆盖的内容，算作不忠实（unfaithful）。注意：来源的标题/文件名属于资料元信息，答案引用它们不算不忠实。只输出 JSON。' },
+  { role: 'user', content: `参考资料：\n${sources.map((s, i) => `[${i + 1}] ${s.filename || ''}${s.title ? ' · ' + s.title : ''}\n${s.text?.slice(0, 500)}`).join('\n') || '(无来源)'}\n\n回答：\n${answer}\n\n输出 {"score": 0到1的小数, "issues": ["不忠实论断列表"]}` },
 ]
 const relevancePrompt = (question, answer) => [
   { role: 'system', content: '你是答案相关性评估器。判断「回答」是否真正回应了「问题」所问的内容（跑题、答非所问、空洞泛泛都算低分）。只输出 JSON。' },
@@ -280,10 +285,75 @@ if (BASELINE) {
 
 // 失败明细提示（评估是度量不是门禁，只提示不改变退出码）
 const badR = (result.retrieval?.rows ?? []).filter((r) => r.recall < 1 || r.noneViolations.length)
-const badA = (result.answer?.rows ?? []).filter((r) => !r.mustOk)
+const badA = (result.answer?.rows ?? []).filter((r) => !r.mustOk || (r.faithfulness != null && r.faithfulness < 0.8))
 if (badR.length + badA.length) {
   console.log(`\n⚠ 未达满分 ${badR.length + badA.length} 题：`)
   for (const r of badR) console.log(`  [检索] ${r.question} → recall=${r.recall}${r.noneViolations.length ? ` 混入:${r.noneViolations.join(',')}` : ''} top=${r.top}`)
-  for (const r of badA) console.log(`  [答案] ${r.question} → 缺: ${r.missingMust.join(',') || '(judge 低分)'}`)
+  for (const r of badA) {
+    console.log(`  [答案] ${r.question} → 缺: ${r.missingMust.join(',') || '(mustOk 达标)'} faith=${r.faithfulness ?? '-'} rel=${r.relevance ?? '-'}`)
+    if (r.faithIssues?.length) console.log(`    忠实度问题: ${r.faithIssues.join('；')}`)
+    if (r.relReason) console.log(`    相关性评语: ${r.relReason}`)
+  }
+}
+
+// --detail：逐题全量明细（检索层含期望覆盖/命中列表；答案层含 judge 逐项），归因定位用
+if (DETAIL) {
+  if (result.retrieval) {
+    console.log('\n== 检索层逐题明细 ==')
+    for (const r of result.retrieval.rows) {
+      const missed = r.expect.filter((k) => !r.covered.includes(k))
+      console.log(`[检索] recall=${r.recall} mrr=${r.mrr} ${r.question}`)
+      console.log(`  期望缺失: ${missed.join(', ') || '-'} ｜ 干扰混入: ${r.noneViolations.join(', ') || '-'} ｜ top1: ${r.top}`)
+      console.log(`  命中: ${r.hits.join(' / ')}`)
+    }
+  }
+  if (result.answer) {
+    console.log('\n== 答案层逐题明细 ==')
+    for (const r of result.answer.rows) {
+      console.log(`[答案] must=${r.mustOk ? 'Y' : 'N'} faith=${r.faithfulness ?? '-'} rel=${r.relevance ?? '-'} ${r.question}`)
+      console.log(`  缺硬事实: ${r.missingMust.join(', ') || '-'} ｜ stopReason: ${r.stopReason} ｜ tokens: ${r.tokens ?? '-'}`)
+      if (r.faithIssues?.length) console.log(`  忠实度问题: ${r.faithIssues.join('；')}`)
+      if (r.relReason) console.log(`  相关性评语: ${r.relReason}`)
+    }
+  }
+}
+
+// 忠实度失分归因汇总：所有 judge 指出的问题按出现频次排序，指导提示词/检索的修复方向
+const allIssues = (result.answer?.rows ?? []).flatMap((r) => r.faithIssues ?? [])
+if (allIssues.length) {
+  const freq = {}
+  for (const s of allIssues) freq[s] = (freq[s] ?? 0) + 1
+  console.log('\n== 忠实度失分归因（按频次）==')
+  for (const [s, n] of Object.entries(freq).sort((a, b) => b[1] - a[1]).slice(0, 10)) {
+    console.log(`  ×${n} ${s}`)
+  }
+}
+
+// --assert：阈值门禁（CI 用），任一断言不达标退出码 1
+if (ASSERT) {
+  const metrics = {
+    ...(result.retrieval
+      ? { recall: result.retrieval.summary.recall, mrr: result.retrieval.summary.mrr, purity: result.retrieval.summary.purity }
+      : {}),
+    ...(result.answer
+      ? { mustOk: result.answer.summary.mustOkRate, faithfulness: result.answer.summary.faithfulness, relevance: result.answer.summary.relevance }
+      : {}),
+  }
+  const fails = []
+  console.log('\n== 阈值断言 ==')
+  for (const cond of ASSERT.split(',')) {
+    const m = cond.trim().match(/^(recall|mrr|purity|mustOk|faithfulness|relevance)\s*(>=|<=|>|<|=)\s*([\d.]+)$/)
+    if (!m) { fails.push(`断言格式非法: ${cond}`); continue }
+    const v = metrics[m[1]]
+    const t = Number(m[3])
+    if (v == null) { console.log(`  ${m[1]} ${m[2]} ${t} → 无值 ❌`); fails.push(`${m[1]} 无值`); continue }
+    const op = { '>=': v >= t, '<=': v <= t, '>': v > t, '<': v < t, '=': Math.abs(v - t) < 1e-9 }[m[2]]
+    console.log(`  ${m[1]} ${m[2]} ${t} → 实际 ${v} ${op ? '✅' : '❌'}`)
+    if (!op) fails.push(cond.trim())
+  }
+  if (fails.length) {
+    console.error(`阈值断言未通过: ${fails.join(', ')}`)
+    process.exit(1)
+  }
 }
 console.log(`\n总耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s`)

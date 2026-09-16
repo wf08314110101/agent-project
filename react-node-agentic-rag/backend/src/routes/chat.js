@@ -15,7 +15,7 @@ import { runAgent } from '../agent/graph.js'
 import { AGENT_SYSTEM } from '../agent/prompts.js'
 import { compressMemory, memoryFallback } from '../agent/memory.js'
 import { rootSpan, runInCtx, flushObs } from '../obs/otel.js'
-import { insertSession, getSession, insertMsg, getMemory, listAfterSeq } from '../store/sqlite.js'
+import { insertSession, getSession, insertMsg, getMemory, listAfterSeq, getDoc } from '../store/sqlite.js'
 import { countPoints } from '../rag/qdrant.js'
 import { config } from '../config.js'
 
@@ -44,8 +44,13 @@ export default async function (app) {
     '/api/chat',
     { config: { rateLimit: { max: config.rate.chatMax, timeWindow: '1 minute' } } }, // chat 单独收紧限流
     async (req, reply) => {
-      const { question, topK = 5, sessionId } = req.body ?? {}
+      const { question, topK = 5, sessionId, docId } = req.body ?? {}
       if (!question?.trim()) return reply.code(400).send({ error: 'question 必填' })
+      // 指定文档问答：docId 必须是本人文档（管理面按用户隔离），否则 404 不泄露存在性
+      if (docId) {
+        const doc = getDoc.get(docId)
+        if (!doc || doc.user_id !== req.user.sub) return reply.code(404).send({ error: '文档不存在' })
+      }
 
       // 会话：无 sessionId（或 sessionId 不属于当前用户）则以首问建新会话
       // 归属校验：别人的 sessionId 对本用户等同「不存在」，静默新建而非 403，避免泄露会话存在性
@@ -93,13 +98,17 @@ export default async function (app) {
         if (event === 'step') steps.push(data)
         else if (event === 'sources') {
           // 多轮检索跨轮合并：模型可能多轮 search_knowledge，只取最后一轮会丢掉
-          // 前几轮已评估通过的相关资料（同块保留最高分，按 RRF 分降序）
+          // 前几轮已评估通过的相关资料（同块保留最高分）。
+          // 保持首次出现顺序（Map 插入序）不重排：tools.js 的全局引用编号 [n]
+          // 依赖「第 n 次新出现的块 = 列表第 n 项」，行内引用锚点靠它对位
           const byKey = new Map(sources.map((s) => [`${s.docId}:${s.chunkIndex}`, s]))
           for (const s of data.sources) {
             const k = `${s.docId}:${s.chunkIndex}`
-            if (!byKey.has(k) || byKey.get(k).score < s.score) byKey.set(k, s)
+            const prev = byKey.get(k)
+            if (!prev) byKey.set(k, s)
+            else if (prev.score < s.score) prev.score = s.score // 原位更新分数，不动顺序
           }
-          sources = [...byKey.values()].sort((a, b) => b.score - a.score)
+          sources = [...byKey.values()]
           send(event, { sources })
           return
         }
@@ -146,6 +155,7 @@ export default async function (app) {
             signal: abort.signal,
             emit,
             usageAcc,
+            docId, // 指定文档问答范围（可选），贯穿到 search_kb 子图
           })
         )
 

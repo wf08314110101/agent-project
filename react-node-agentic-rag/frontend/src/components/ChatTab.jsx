@@ -3,7 +3,32 @@ import { streamChat, fetchSessions, fetchMessages, removeSession } from '../api.
 
 const PHASE_ICON = { action: '🔧', observation: '👁️', thought: '💭' }
 
-export default function ChatTab() {
+// 正文引用渲染：把 [n] 拆成可点击徽标，点击高亮并滚动到对应来源卡片
+// 无编号文本原样返回；n 超出来源数（模型编造/历史消息旧编号）时按纯文本处理
+function renderContent(text, msgIndex, cites) {
+  const parts = String(text).split(/(\[\d{1,2}\])/g)
+  return parts.map((p, k) => {
+    const m = p.match(/^\[(\d{1,2})\]$/)
+    if (!m || !cites.has(+m[1])) return p
+    return (
+      <sup
+        key={k}
+        className="cite"
+        onClick={() => {
+          const el = document.getElementById(`src-${msgIndex}-${m[1]}`)
+          if (!el) return
+          el.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+          el.classList.add('hl')
+          setTimeout(() => el.classList.remove('hl'), 1500)
+        }}
+      >
+        {m[1]}
+      </sup>
+    )
+  })
+}
+
+export default function ChatTab({ askDoc, onClearAsk }) {
   const [sessions, setSessions] = useState([])
   const [sessionId, setSessionId] = useState(null)
   const [messages, setMessages] = useState([])
@@ -80,11 +105,15 @@ export default function ChatTab() {
         question: q,
         topK,
         sessionId,
+        docId: askDoc?.id, // 指定文档问答：空 = 全库检索
         signal: ctrl.signal,
         onEvent: (ev, d) => {
           if (ev === 'sources') patchLast((x) => ({ ...x, sources: d.sources }))
           else if (ev === 'step') patchLast((x) => ({ ...x, steps: [...x.steps, d] }))
-          else if (ev === 'delta') {
+          else if (ev === 'reasoning') {
+            // Thought 独立通道：思维链 token 不混入正文，折叠面板单独展示
+            patchLast((x) => ({ ...x, reasoning: (x.reasoning ?? '') + d.text }))
+          } else if (ev === 'delta') {
             patchLast((x) => ({ ...x, content: x.content + d.text }))
             scroll()
           } else if (ev === 'usage') patchLast((x) => ({ ...x, usage: d }))
@@ -139,7 +168,9 @@ export default function ChatTab() {
           {messages.length === 0 && (
             <div className="empty">上传文档后提问，Agent 会自主检索、评估并改写查询</div>
           )}
-          {messages.map((m, i) => (
+          {messages.map((m, i) => {
+            const cites = new Set((m.sources ?? []).map((s) => s.cite ?? 0))
+            return (
             <div key={i} className={`msg ${m.role}`}>
               <div className="bubble">
                 {m.role === 'assistant' && m.steps?.length > 0 && (
@@ -154,21 +185,33 @@ export default function ChatTab() {
                     ))}
                   </div>
                 )}
+                {m.role === 'assistant' && m.reasoning && (
+                  <details className="reasoning" open={m.status === 'streaming' && !m.content}>
+                    <summary>💭 {m.status === 'streaming' && !m.content ? '思考中…' : '思考过程'}</summary>
+                    <pre>{m.reasoning}</pre>
+                  </details>
+                )}
                 {m.role === 'assistant' && m.sources?.length > 0 && (
                   <div className="sources">
                     <b>检索来源（{m.sources.length}）</b>
                     <ol>
-                      {m.sources.map((s, j) => (
-                        <li key={j}>
-                          <span className="title">{s.title || s.filename || '无标题'}</span>
-                          <span className="score">{s.score?.toFixed(3)}</span>
-                        </li>
-                      ))}
+                      {m.sources.map((s, j) => {
+                        const n = s.cite ?? j + 1
+                        return (
+                          <li key={j} id={`src-${i}-${n}`}>
+                            <span className="cite-no">[{n}]</span>
+                            <span className="title">{s.title || s.filename || '无标题'}</span>
+                            <span className="score">{s.score?.toFixed(3)}</span>
+                          </li>
+                        )
+                      })}
                     </ol>
                   </div>
                 )}
                 <div className="content">
-                  {m.content || (m.status === 'streaming' ? '…' : '')}
+                  {m.role === 'assistant'
+                    ? renderContent(m.content || (m.status === 'streaming' ? '…' : ''), i, cites)
+                    : m.content}
                 </div>
                 {m.usage && (
                   <div className="usage">
@@ -178,10 +221,17 @@ export default function ChatTab() {
                 )}
               </div>
             </div>
-          ))}
+            )
+          })}
         </div>
 
         <div className="input-bar">
+          {askDoc && (
+            <span className="ask-doc" title="仅在该文档范围内检索">
+              📄 {askDoc.filename}
+              <button onClick={onClearAsk}>×</button>
+            </span>
+          )}
           <label className="topk">
             top-k
             <input

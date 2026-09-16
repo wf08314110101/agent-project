@@ -82,17 +82,26 @@ export async function runTool(name, args, cfg) {
         { question: String(args.question ?? ''), queries: [String(args.question ?? '')], attempts: 1 },
         cfg
       )
+      // 全局引用编号：跨多轮 search_knowledge 连续编号（同块不重复编号），
+      // 保证 Observation 里的 [n] 与前端 sources 卡片位置一一对应，行内引用可点击跳转
+      const cc = cfg?.configurable ?? {}
+      cc.citeMap ??= new Map() // key = docId:chunkIndex → 全局编号；每次 invoke 独立
+      for (const h of res.hits) {
+        const k = `${h.docId}:${h.chunkIndex}`
+        if (!cc.citeMap.has(k)) cc.citeMap.set(k, cc.citeMap.size + 1)
+        h.cite = cc.citeMap.get(k) // 随 sources 事件下发，前端渲染编号徽标
+      }
       // sources 事件：把最终命中资料推给前端做引用展示
       cfg?.configurable?.emit?.('sources', { sources: res.hits })
       if (!res.hits.length) return `知识库中没有找到与「${args.question}」相关的资料。`
-      // 把命中块拼成带编号+相似度的资料文本，供模型引用 [1][2]...
+      // 把命中块拼成带全局编号+相似度的资料文本，编号即回答中 [n] 的取值来源
       const body = res.hits
         .map(
           (h, i) =>
-            `[${i + 1}] (相似度 ${h.score.toFixed(3)}) ${h.filename}${h.title ? ' · ' + h.title : ''}\n${h.text}`
+            `[${h.cite}] (相似度 ${h.score.toFixed(3)}) ${h.filename}${h.title ? ' · ' + h.title : ''}\n${h.text}`
         )
         .join('\n\n')
-      return `检索到 ${res.hits.length} 条资料（材料${res.enough ? '充足' : '有限'}）:\n\n${body}`
+      return `检索到 ${res.hits.length} 条资料（材料${res.enough ? '充足' : '有限'}；引用编号 [n] 为全局唯一，回答中原样使用）:\n\n${body}`
     }
     case 'calculator':
       return calc(String(args.expression ?? ''))

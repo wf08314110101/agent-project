@@ -26,6 +26,7 @@ import authRoutes from './routes/auth.js'
 import documentRoutes from './routes/documents.js'
 import chatRoutes from './routes/chat.js'
 import sessionRoutes from './routes/sessions.js'
+import debugRoutes from './routes/debug.js'
 import { initObs, flushObs } from './obs/otel.js'
 
 // 启动统一观测层：一次埋点按配置扇出（PHOENIX_ENABLED / LANGFUSE_* 三项）
@@ -74,6 +75,7 @@ const protectedRoutes = async (api) => {
   api.register(documentRoutes)  // 文档上传 / 列表 / 删除
   api.register(sessionRoutes)   // 会话列表 / 消息回放 / 删除
   api.register(chatRoutes)      // POST /api/chat            SSE 流式问答（核心）
+  api.register(debugRoutes)     // GET  /api/debug/retrieval 裸检索观测（评估/调参）
 }
 app.register(protectedRoutes)
 

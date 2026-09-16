@@ -1,0 +1,26 @@
+{"question": "系统的检索用的是什么模式？为什么比纯向量检索好", "expect": ["RRF", "倒数排名融合", "混合检索"], "answer_must": ["RRF"], "note": "技术/主指标题"}
+{"question": "CRAG 模式下改写查询最多重试几次", "expect": ["最多尝试 2 次", "改写查询后重新检索"], "answer_must": ["2"], "note": "数字事实"}
+{"question": "评估缓存为什么不会因为删文档而读到脏数据", "expect": ["文本哈希", "内容寻址", "增删文档"], "note": "原理题"}
+{"question": "Agent 内置了哪些工具", "expect": ["search_knowledge", "calculator", "get_current_time"], "answer_must": ["search_knowledge", "calculator"], "note": "枚举题"}
+{"question": "LangGraph 主图的循环模式叫什么名字", "expect": ["ReAct", "agent 节点", "tools 节点"], "answer_must": ["ReAct"], "note": "专名"}
+{"question": "稀疏检索路用什么做分词和加权", "expect": ["jieba", "IDF", "BM25"], "note": "技术细节"}
+{"question": "首轮检索为什么不先改写问题", "expect": ["首轮不调用改写", "原问题直查", "改写的 token"], "note": "设计取舍"}
+{"question": "工具参数在执行前会经过什么检查", "expect": ["schema 校验", "校验门"], "note": "机制题"}
+{"question": "ZS-2026 项目的负责人是谁", "expect": ["张三"], "answer_must": ["张三"], "note": "专名/干扰文档下命中"}
+{"question": "蓝色风暴的项目总预算是多少", "expect": ["480 万"], "answer_must": ["480"], "note": "数字"}
+{"question": "蓝色风暴什么时候正式上线", "expect": ["2026 年 10 月 1 日", "10 月 1 日"], "answer_must": ["10 月 1 日"], "note": "日期"}
+{"question": "蓝色风暴上线后的北极星指标有哪些", "expect": ["月活跃团队数达到 500", "点踩率"], "note": "多要点"}
+{"question": "生产环境 compose 一共编排了几个服务", "expect": ["四个服务", "qdrant", "nginx"], "note": "运维"}
+{"question": "对话接口的限流是每分钟多少次", "expect": ["20 次"], "answer_must": ["20"], "note": "数字（同块含 120 干扰）"}
+{"question": "数据备份保留多少份", "expect": ["保留最近 7 份", "7 份"], "note": "数字"}
+{"question": "SSE 流式被缓冲成一次性输出通常是哪里没配置", "expect": ["proxy_buffering"], "note": "英文专名/稀疏路强项"}
+{"question": "一线城市住宿报销上限是每晚多少钱", "expect": ["600 元"], "answer_must": ["600"], "note": "制度数字"}
+{"question": "餐费补贴每天多少钱", "expect": ["150 元"], "answer_must": ["150"], "note": "制度数字"}
+{"question": "报销单最晚什么时候提交", "expect": ["30 天"], "answer_must": ["30 天"], "note": "时限"}
+{"question": "竞品 A 的月活跃用户是多少", "expect": ["120 万"], "answer_must": ["120 万"], "note": "竞品数字（同块多数字干扰）"}
+{"question": "哪个竞品支持多模态文档理解", "expect": ["竞品 B", "多模态文档理解"], "answer_must": ["多模态"], "note": "对比题"}
+{"question": "牛肉应该怎么腌制", "expect": ["生抽", "蚝油", "腌制 40 分钟"], "note": "干扰文档的正向可检性"}
+{"question": "烤鸡翅的火候怎么控制", "expect": ["加盖焖烤", "薄区"], "note": "干扰文档的正向可检性"}
+{"question": "万能干料的配比是什么", "expect": ["孜然粉", "辣椒面", "4 比 3"], "note": "配比数字"}
+{"question": "向量数据库的混合检索要怎么做", "expect": ["RRF", "稠密", "稀疏"], "expect_none": ["腌制", "火候", "蘸料"], "note": "负向：技术题不得混入烧烤块"}
+{"question": "出差的发票丢失了还能报销吗", "expect": ["30 天", "发票"], "expect_none": ["孜然", "腌制"], "note": "负向：制度题不得混入烧烤块"}

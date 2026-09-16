@@ -71,19 +71,28 @@ docker compose up -d backend frontend
 | DELETE | `/api/documents/:id` | 先删向量再删元数据；摄取中返回 409；他人文档 404 |
 | POST | `/api/chat` | `{question, topK, sessionId?}` → SSE |
 | GET | `/api/sessions` · `/:id/messages` · DELETE | 会话管理（按用户隔离，他人会话 404） |
+| GET | `/api/debug/retrieval?q=&topK=` | 裸检索观测（评估数据源/调参用） |
 | GET | `/api/health` | 健康检查（开放，供容器探活） |
 
 除 `/api/auth/login` 与 `/api/health` 外，所有接口需 `Authorization: Bearer <token>`。知识库检索是共享池（团队知识库语义）：文档管理面按用户隔离，向量检索不做用户过滤。
 
 `POST /api/chat` 事件流：`step`(action/observation，时间线) → `sources`(来源卡片) → `delta`(正文 token) → `usage`(轮次/token/耗时) → `done`(stopReason: normal/max_iter/abort/error) ｜ `error`。
 
-## 回归测试
+## 回归与评估
 
 ```bash
-node scripts/regression.mjs          # 需先起服务；自动以 demo/demo123 登录，6 类坏用例断言，失败退出码 1
+# 行为红线（快，CI 每次跑）：6 类坏用例断言，失败退出码 1
+node scripts/regression.mjs          # 需先起服务；自动以 demo/demo123 登录
 AUTH_USER=alice AUTH_PASS=xxx node scripts/regression.mjs    # 换账号
 BASE_URL=http://localhost:8080 node scripts/regression.mjs   # 打容器栈
+
+# 质量水位（M6）：evals/golden.jsonl 26 题 + 6 fixture 文档（自动上传，幂等）
+node scripts/evaluate.mjs --layer retrieval   # 检索层：recall@k / MRR / purity（零 LLM，秒级）
+node scripts/evaluate.mjs                     # 全量：+ 答案层 mustOk / faithfulness / relevance（LLM judge）
+node scripts/evaluate.mjs --baseline evals/results/<旧档>.json   # 与基线对比（调参前后 A/B）
 ```
+
+检索调参流程：改 `RETRIEVE_MIN_SCORE` / chunk 策略 / rerank 前跑一次存基线，改完 `--baseline` 对比数字。基线（当前混合检索）：recall@5=1.0，MRR=0.981，purity=1，答案层 mustOkRate=1、faithfulness=0.854。
 
 ## 已知坑（复盘）
 
@@ -97,11 +106,12 @@ BASE_URL=http://localhost:8080 node scripts/regression.mjs   # 打容器栈
 ## 目录
 
 ```
-backend/src/  server·config·auth·llm·schema ｜ routes/(auth·chat·documents·sessions·health)
+backend/src/  server·config·auth·llm·schema ｜ routes/(auth·chat·documents·sessions·debug·health)
               rag/(parser·chunker·embedder·tokenizer·qdrant·ingest)
               agent/(graph·search-graph·tools·prompts·memory) ｜ store/sqlite ｜ obs/otel
 frontend/src/ App ｜ components/(Login·ChatTab·DocsTab) ｜ api(token + SSE 解析)
-scripts/      regression.mjs
+scripts/      regression.mjs（回归）· evaluate.mjs（评估）
+evals/        golden.jsonl（26 题标注）· fixtures/（6 文档）· results/（基线存档）
 .github/      workflows/ci.yml（回归 + 镜像构建）
 docs/         功能演进时间线.md
 ```

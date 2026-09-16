@@ -180,4 +180,37 @@ main { margin-top: 16px; }
 .docs th { background: #fafbfc; color: var(--muted); font-weight: 500; }
 .docs .row-actions { display: flex; gap: 6px; }
 .docs .ask { background: var(--brand-weak); color: var(--brand); padding: 4px 10px; font-size: 13px; }
+.docs .edit { background: #f0f1f3; color: #444; padding: 4px 10px; font-size: 13px; }
 .docs .del { background: transparent; color: var(--warn); padding: 4px 10px; }
+
+/* ---------- M10 RBAC：密级/标签/筛选/编辑器 ---------- */
+.user-dept, .user-role { padding: 1px 8px; border-radius: 10px; font-size: 12px; }
+.user-dept { background: #eef2ff; color: #4353c9; }
+.user-role { background: #1a1d26; color: #ffd66e; }
+.cls-select { padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; background: var(--card); }
+.owner-tag { margin-left: 8px; font-size: 12px; color: var(--muted); background: #f2f3f5; padding: 1px 7px; border-radius: 9px; }
+.cls-badge { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 9px; margin-right: 6px; }
+.cls-public { background: #e3f6e8; color: #1a7f37; }
+.cls-dept { background: #eef2ff; color: #4353c9; }
+.cls-private { background: #fff1e0; color: #b26a00; }
+.doc-tag { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 9px; margin-right: 4px; background: #f0f1f3; color: #555; }
+.filter-bar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.filter-chip {
+  padding: 4px 12px; border-radius: 14px; font-size: 13px; cursor: pointer;
+  background: var(--card); border: 1px solid var(--line); color: var(--muted);
+}
+.filter-chip.on { background: var(--brand-weak); border-color: var(--brand); color: var(--brand); }
+.tag-picker { display: flex; flex-wrap: wrap; gap: 6px; }
+.tag-chip {
+  padding: 3px 10px; border-radius: 12px; font-size: 12.5px; cursor: pointer;
+  background: var(--card); border: 1px solid var(--line); color: var(--muted);
+}
+.tag-chip.on { background: var(--brand-weak); border-color: var(--brand); color: var(--brand); }
+.doc-editor {
+  margin-top: 14px; padding: 14px; background: var(--card);
+  border: 1px solid var(--line); border-radius: 10px; display: flex; flex-direction: column; gap: 10px;
+}
+.editor-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.editor-row > label { font-size: 13px; color: var(--muted); width: 32px; }
+.editor-actions { display: flex; gap: 8px; }
+.editor-actions .ask, .editor-actions .del { padding: 6px 16px; font-size: 13px; }

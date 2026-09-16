@@ -74,6 +74,7 @@ Agentic RAG 系统设置最大工具调用轮数为 6，超限后强制模型基
 async function uploadFixture() {
   const fd = new FormData()
   fd.append('file', new Blob([FIXTURE]), 'regression-fixture.md')
+  fd.append('classification', 'public') // M10 RBAC：回归语料对所有用户可读
   const r = await fetch(`${BASE}/api/documents`, { method: 'POST', headers: authHeaders(), body: fd })
   if (!r.ok && r.status !== 409) throw new Error(`上传失败 HTTP ${r.status}`)
   // 等摄取完成（最多 60s）

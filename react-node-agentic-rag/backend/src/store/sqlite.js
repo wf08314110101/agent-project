@@ -65,11 +65,34 @@ try { db.exec('CREATE INDEX IF NOT EXISTS idx_documents_user ON documents(user_i
 // 历史查询按 session 过滤，无索引会全表扫
 db.exec('CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id)')
 
-// ---- users：登录账号（AUTH_USERS 预置播种）----
-export const upsertUser = db.prepare(
-  'INSERT INTO users (id, username, pass_hash) VALUES (?, ?, ?) ON CONFLICT(username) DO NOTHING'
-)
+// M10 RBAC：用户角色/部门 + 文档密级/标签 + 显式授权表
+// 密级三级：public（全体登录用户）/ dept（同 owner 部门）/ private（仅 owner + 显式授权）
+// 存量文档 DEFAULT 'public' 保持升级前可见性；新上传默认 private 由 API 层决定
+// 注意：必须放在所有预编译语句之前（语句引用这些新列）
+try { db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'member'") } catch { }
+try { db.exec("ALTER TABLE users ADD COLUMN dept TEXT NOT NULL DEFAULT ''") } catch { }
+try { db.exec("ALTER TABLE documents ADD COLUMN classification TEXT NOT NULL DEFAULT 'public'") } catch { }
+try { db.exec("ALTER TABLE documents ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'") } catch { }
+db.exec(`
+CREATE TABLE IF NOT EXISTS doc_grants (
+  doc_id  TEXT NOT NULL,             -- documents.id
+  user_id TEXT NOT NULL,             -- users.id（被授权人）
+  PRIMARY KEY (doc_id, user_id)
+);
+`)
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_grants_user ON doc_grants(user_id)') } catch { }
+
+// ---- users：登录账号（AUTH_USERS 预置播种；M10 起带角色/部门）----
+// 播种语义：密码只写一次（已存在用户不覆盖，改密码需清表）；
+// role/dept 每次启动按 env 刷新（env 为准，admin 接口的临时修改在下次重启后被 env 覆盖）
+export const upsertUser = db.prepare(`
+  INSERT INTO users (id, username, pass_hash, role, dept) VALUES (?, ?, ?, ?, ?)
+  ON CONFLICT(username) DO UPDATE SET role = excluded.role, dept = excluded.dept
+`)
 export const getUserByName = db.prepare('SELECT * FROM users WHERE username = ?')
+export const getUserById = db.prepare('SELECT * FROM users WHERE id = ?')
+export const listUsers = db.prepare('SELECT id, username, role, dept, created_at FROM users ORDER BY created_at')
+export const updateUserMeta = db.prepare('UPDATE users SET role = ?, dept = ? WHERE id = ?')
 // 历史文档归属回填：M5 升级前入库的文档 user_id=''（无主），统一划给首个预置用户管理
 export const backfillDocsToUser = db.prepare("UPDATE documents SET user_id = ? WHERE user_id = ''")
 
@@ -81,11 +104,26 @@ try { db.exec('ALTER TABLE sessions ADD COLUMN summary TEXT NOT NULL DEFAULT \'\
 try { db.exec('ALTER TABLE sessions ADD COLUMN summarized_seq INTEGER NOT NULL DEFAULT 0') } catch { }
 try { db.exec('ALTER TABLE sessions DROP COLUMN summarized_count') } catch { } // 旧数量断点，已被 seq 取代
 
-// ---- documents：摄取队列 + 文档管理 ----
+// ---- documents：摄取队列 + 文档管理（M10 起带密级/标签/授权）----
 export const insertDoc = db.prepare(
-  'INSERT INTO documents (id, filename, size, hash, chunks, status, error, path, user_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  'INSERT INTO documents (id, filename, size, hash, chunks, status, error, path, user_id, classification, tags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
 )
-export const listDocsByUser = db.prepare('SELECT * FROM documents WHERE user_id = ? ORDER BY created_at DESC')
+// 可见列表：本人文档 ∪ public ∪ 同部门(dept) ∪ 被显式授权；owner_name 供 admin 视图展示归属
+export const listDocsVisible = db.prepare(`
+  SELECT d.*, u.username AS owner_name, u.dept AS owner_dept
+  FROM documents d LEFT JOIN users u ON u.id = d.user_id
+  WHERE d.user_id = ?
+     OR d.classification = 'public'
+     OR (d.classification = 'dept' AND ? != '' AND u.dept = ?)
+     OR d.id IN (SELECT doc_id FROM doc_grants WHERE user_id = ?)
+  ORDER BY d.created_at DESC
+`)
+export const listDocsAll = db.prepare(`
+  SELECT d.*, u.username AS owner_name, u.dept AS owner_dept
+  FROM documents d LEFT JOIN users u ON u.id = d.user_id
+  ORDER BY d.created_at DESC
+`)
+export const updateDocMeta = db.prepare('UPDATE documents SET classification = ?, tags = ? WHERE id = ?')
 export const getDoc = db.prepare('SELECT * FROM documents WHERE id = ?')
 export const getDocByHash = db.prepare('SELECT * FROM documents WHERE hash = ?')
 export const deleteDocRow = db.prepare('DELETE FROM documents WHERE id = ?')
@@ -97,6 +135,13 @@ export const nextPendingDoc = db.prepare(
   "SELECT * FROM documents WHERE status IN ('pending','processing') ORDER BY created_at ASC LIMIT 1"
 )
 export const resetProcessing = db.prepare("UPDATE documents SET status = 'pending' WHERE status = 'processing'")
+
+// ---- doc_grants：显式授权（P1：private 文档可单独授权给指定用户）----
+export const listGrantsByDoc = db.prepare('SELECT user_id FROM doc_grants WHERE doc_id = ?')
+export const listGrantsForUser = db.prepare('SELECT doc_id FROM doc_grants WHERE user_id = ?')
+export const grantDoc = db.prepare('INSERT OR IGNORE INTO doc_grants (doc_id, user_id) VALUES (?, ?)')
+export const revokeGrant = db.prepare('DELETE FROM doc_grants WHERE doc_id = ? AND user_id = ?')
+export const deleteGrantsByDoc = db.prepare('DELETE FROM doc_grants WHERE doc_id = ?')
 
 // ---- sessions：会话管理（M5 起按 user_id 隔离）----
 export const insertSession = db.prepare('INSERT INTO sessions (id, title, user_id) VALUES (?, ?, ?)')

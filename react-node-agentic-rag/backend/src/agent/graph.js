@@ -181,8 +181,9 @@ export const agentGraph = new StateGraph(AgentState)
  * @param {Function} emit   - SSE 事件发射器 (event, data)
  * @param {Array}  usageAcc- usage 累积数组，路由层最后汇总
  * @param {string} [docId] - 指定文档检索范围（「对此文档提问」），空则检索全库
+ * @param {object|null} [acl] - M10 RBAC 检索过滤（aclFor 产物），贯穿到 search_kb 子图
  */
-export function runAgent({ messages, topK = 5, signal, emit, usageAcc, docId }) {
+export function runAgent({ messages, topK = 5, signal, emit, usageAcc, docId, acl }) {
   return agentGraph.invoke(
     { messages, stepCount: 0 },
     {
@@ -192,6 +193,7 @@ export function runAgent({ messages, topK = 5, signal, emit, usageAcc, docId }) 
         usageAcc,
         topK,
         docId: docId || undefined, // 贯穿到 search_kb 子图的 retrieveNode（payload 过滤）
+        acl: acl ?? undefined,    // 贯穿到 retrieveNode：密级/归属/授权的服务端过滤
         actionLog: new Map(), // 重复 Action 检测缓存（每次 invoke 独立，跨请求不共享）
       },
     }

@@ -6,7 +6,11 @@ import { getToken, setToken, setOnUnauthorized } from './api.js'
 
 export default function App() {
   // 登录态：localStorage有 token 即视为已登录（token 过期由 api 层 401 统一兜底）
-  const [user, setUser] = useState(() => (getToken() ? localStorage.getItem('agr_user') || '已登录' : null))
+  // user = { username, role, dept }（M10 RBAC：role/dept 用于前端 UI 显隐，判定以后端为准）
+  const [user, setUser] = useState(() => {
+    if (!getToken()) return null
+    try { return JSON.parse(localStorage.getItem('agr_user')) } catch { return localStorage.getItem('agr_user') || '已登录' }
+  })
   const [tab, setTab] = useState('chat')
   // 指定文档问答：DocsTab「提问」→ 记录目标文档并切到对话 Tab，ChatTab 挂检索范围徽标
   const [askDoc, setAskDoc] = useState(null)
@@ -16,9 +20,9 @@ export default function App() {
     setOnUnauthorized(() => setUser(null))
   }, [])
 
-  function handleLogin(name) {
-    localStorage.setItem('agr_user', name)
-    setUser(name)
+  function handleLogin(u) {
+    localStorage.setItem('agr_user', JSON.stringify(u))
+    setUser(u)
   }
 
   function logout() {
@@ -29,6 +33,7 @@ export default function App() {
 
   if (!user) return <Login onLogin={handleLogin} />
 
+  const isAdmin = user?.role === 'admin'
   return (
     <div className="app">
       <header className="app-header">
@@ -38,7 +43,9 @@ export default function App() {
           <button className={tab === 'docs' ? 'on' : ''} onClick={() => setTab('docs')}>文档</button>
         </nav>
         <span className="user-box">
-          {user}
+          {user?.username ?? user}
+          {user?.dept && <span className="user-dept">{user.dept}</span>}
+          {isAdmin && <span className="user-role">admin</span>}
           <button className="logout-btn" onClick={logout}>退出</button>
         </span>
       </header>
@@ -46,7 +53,7 @@ export default function App() {
         {tab === 'chat' ? (
           <ChatTab askDoc={askDoc} onClearAsk={() => setAskDoc(null)} />
         ) : (
-          <DocsTab onAsk={(doc) => { setAskDoc(doc); setTab('chat') }} />
+          <DocsTab user={user} onAsk={(doc) => { setAskDoc(doc); setTab('chat') }} />
         )}
       </main>
     </div>

@@ -14,11 +14,12 @@ import { hybridSearch } from './qdrant.js'
  * @param {string}  question - 自然语言问题
  * @param {number}  topK     - 检索条数（默认 5）
  * @param {string}  [docId]  - 指定文档过滤（调试口/评估用），空则检索全库
+ * @param {object|null} [acl]- M10 RBAC 过滤（aclFor 产物），缺省不过滤
  * @returns {Promise<Array>} 命中块（阈值已在稠密路 prefetch 服务端应用；
  *          融合分为排名分，不再二次过滤）
  */
-export async function retrieve(question, topK = 5, docId) {
+export async function retrieve(question, topK = 5, docId, acl) {
   const vector = await embedOne(question)
-  const { hits } = await hybridSearch({ text: question, vector, limit: topK, docId })
+  const { hits } = await hybridSearch({ text: question, vector, limit: topK, docId, acl })
   return hits
 }

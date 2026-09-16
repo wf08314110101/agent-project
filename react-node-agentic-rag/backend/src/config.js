@@ -87,14 +87,15 @@ export const config = {
   auth: {
     // JWT 签名密钥：生产必须显式配置；缺省时仅给开发期兜底值（启动时会打警告）
     jwtSecret: env('JWT_SECRET', 'dev-insecure-secret'),
-    // 预置用户清单：'用户名:密码,用户名:密码'，启动时播种进 users 表（密码 scrypt 哈希存储）
+    // 预置用户清单：'用户名:密码[:角色[:部门]]'，如 'demo:demo123,alice:alice123:member:研发,boss:boss123:admin'
+    // 角色 member|admin（admin 可见全部文档并管理用户）；部门为字符串编码（如 研发/销售），留空则 dept 级文档对其不可见
     users: String(env('AUTH_USERS', ''))
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean)
       .map((s) => {
-        const i = s.indexOf(':')
-        return { username: s.slice(0, i), password: s.slice(i + 1) }
+        const p = s.split(':')
+        return { username: p[0], password: p[1] ?? '', role: p[2] || 'member', dept: p[3] || '' }
       })
       .filter((u) => u.username && u.password),
   },

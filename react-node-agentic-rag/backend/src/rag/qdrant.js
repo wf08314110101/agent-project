@@ -46,6 +46,16 @@ export async function ensureCollection() {
     await ensureCollection()
     return
   }
+  // M10 RBAC 存量回填：旧点位无 classification payload → 补 public
+  // （升级前文档全局可读，保持原可见性；否则 ACL 过滤会把旧文档全部滤掉）
+  try {
+    await qdrant.setPayload(config.qdrantCollection, {
+      payload: { classification: 'public' },
+      filter: { must: [{ is_empty: { key: 'classification' } }] },
+    })
+  } catch (e) {
+    console.warn(`[qdrant] ACL payload 存量回填失败: ${e.message}`)
+  }
   console.log(`[qdrant] 集合 ${config.qdrantCollection} 已存在，跳过创建`)
 }
 
@@ -54,9 +64,10 @@ const isAlreadyExists = (e) => e?.status === 409 || /already exists/i.test(Strin
 
 /**
  * 批量写入向量点：每块一个随机 UUID point；向量 = { dense, sparse } 双路，
- * sparse 的输入与稠密嵌入一致（标题+正文拼接），保证两路看的是同一段内容
+ * sparse 的输入与稠密嵌入一致（标题+正文拼接），保证两路看的是同一段内容。
+ * acl：RBAC 随行元数据（ownerId/classification/ownerDept），写入每块 payload 供召回前过滤
  */
-export async function indexChunks({ docId, filename, chunks, vectors }) {
+export async function indexChunks({ docId, filename, chunks, vectors, acl = {} }) {
   const points = chunks.map((c, i) => {
     const text = c.title ? `${c.title}\n${c.text}` : c.text
     return {
@@ -68,6 +79,9 @@ export async function indexChunks({ docId, filename, chunks, vectors }) {
         title: c.title,     // 所属章节标题（块上下文）
         text: c.text,       // 块正文
         chunkIndex: i,      // 块序号（去重 key 的一部分）
+        ownerId: acl.ownerId ?? '',              // M10 RBAC：归属人
+        classification: acl.classification ?? 'public', // 密级：public/dept/private
+        ownerDept: acl.ownerDept ?? '',          // 归属人部门（dept 密级过滤键）
       },
     }
   })
@@ -87,13 +101,35 @@ export async function indexChunks({ docId, filename, chunks, vectors }) {
  * @param {'rrf'|'dbsf'} [p.fusion]     - 融合算法（M8 实验：rrf 排名融合 / dbsf 绝对分融合）
  * @param {number}   [p.prefetchMul]    - 召回池倍率（0/缺省 = 默认 max(k*3,12)）
  * @param {'none'|'dense'} [p.rerank]   - dense rescore：召回池并集按稠密语义分精排
+ * @param {object|null} [p.acl] - M10 RBAC 过滤：{ userId, role, dept, grants?: string[] }；
+ *        null/缺省 = 不过滤（脚本/评估直连）；admin 跳过过滤；member 按密级 + 授权过滤
  * @returns {Promise<{hits: Array, mode: string}>} 融合后 topK；
  *          mode = 'hybrid-rrf' | 'hybrid-dbsf' | 'hybrid-rrf+dense' | 'dense-fallback'
  */
-export async function hybridSearch({ text, vector, limit = 5, docId, fusion = config.retrieveFusion, prefetchMul = 0, rerank = 'none' }) {
+export async function hybridSearch({ text, vector, limit = 5, docId, acl, fusion = config.retrieveFusion, prefetchMul = 0, rerank = 'none' }) {
   const k = prefetchLimit(limit, prefetchMul)
-  // docId 范围过滤：挂顶层 filter（融合后生效），两路 prefetch 天然都被约束
-  const scope = docId ? { filter: { must: [{ key: 'docId', match: { value: docId } }] } } : {}
+  // M10 ACL：密级下沉为召回前服务端过滤（payload: classification/ownerId/ownerDept）
+  // 可读条件（should 组，至少命中其一）：public ∪ 本人所有 ∪ 同部门 dept ∪ 显式授权 docId
+  const aclCond = acl && acl.role !== 'admin'
+    ? {
+        should: [
+          { key: 'classification', match: { value: 'public' } },
+          { key: 'ownerId', match: { value: acl.userId } },
+          ...(acl.dept
+            ? [{ must: [{ key: 'classification', match: { value: 'dept' } }, { key: 'ownerDept', match: { value: acl.dept } }] }]
+            : []),
+          ...(acl.grants?.length ? [{ key: 'docId', match: { any: acl.grants } }] : []),
+        ],
+      }
+    : {}
+  // docId 范围过滤：挂顶层 filter（融合后生效），两路 prefetch 天然都被约束；
+  // must（docId 范围）与 should（ACL 可读性）同层 = AND 语义，两层同时生效
+  const scope = {
+    filter: {
+      ...(docId ? { must: [{ key: 'docId', match: { value: docId } }] } : {}),
+      ...aclCond,
+    },
+  }
   const sparseVec = toSparse(text)
   const fetch2 = [
     // 稠密路：语义相似；阈值粗滤在服务端做（余弦分量纲，仅此路有效）
@@ -152,6 +188,18 @@ export async function deleteDocPoints(docId) {
     wait: true,
   })
   invalidateCount() // 点数变化：空库降级预判的计数缓存立即失效
+}
+
+/**
+ * 同步文档级 ACL payload（M10）：PATCH 密级后把新值刷到该文档所有块的 payload，
+ * 保证「改密级 → 检索立即生效」，无需重新摄取
+ */
+export async function setDocAclPayload(docId, { ownerId, classification, ownerDept }) {
+  await qdrant.setPayload(config.qdrantCollection, {
+    payload: { ownerId: ownerId ?? '', classification: classification ?? 'public', ownerDept: ownerDept ?? '' },
+    filter: { must: [{ key: 'docId', match: { value: docId } }] },
+    wait: true,
+  })
 }
 
 /**

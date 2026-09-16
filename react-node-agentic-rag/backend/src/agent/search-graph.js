@@ -40,11 +40,11 @@ async function retrieveNode(state, cfg) {
   })
 
   // 每个查询词独立向量化 + 混合检索，Promise.all 并发执行
-  // docId 存在时限定单文档范围（「对此文档提问」），由主图 configurable 贯穿而来
+  // docId 存在时限定单文档范围（「对此文档提问」）；acl 为 M10 RBAC 密级过滤（贯穿自主图）
   let mode = 'hybrid-rrf'
   const results = await Promise.all(
     state.queries.map(async (q) => {
-      const r = await hybridSearch({ text: q, vector: await embedOne(q), limit: topK, docId: c.docId })
+      const r = await hybridSearch({ text: q, vector: await embedOne(q), limit: topK, docId: c.docId, acl: c.acl })
       if (r.mode === 'dense-fallback') mode = r.mode // 任一路退化则整体标记
       return r.hits
     })

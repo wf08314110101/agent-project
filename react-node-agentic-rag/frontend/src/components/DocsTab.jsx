@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import { apiFetch, streamDocEvents } from '../api.js'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { apiFetch, streamDocEvents, updateDoc, fetchUsers } from '../api.js'
 
 const STATUS_META = {
   pending: { text: '排队中', cls: 'st-pending' },
@@ -7,12 +7,31 @@ const STATUS_META = {
   ready: { text: '就绪', cls: 'st-ready' },
   failed: { text: '失败', cls: 'st-failed' },
 }
+const CLS_META = {
+  public: { text: '公开', cls: 'cls-public' },
+  dept: { text: '部门', cls: 'cls-dept' },
+  private: { text: '私有', cls: 'cls-private' },
+}
+export const CLASSIFICATIONS = ['public', 'dept', 'private']
+export const TAG_WHITELIST = ['技术方案', '制度', '会议纪要', '运维', '竞品', '测试']
+const parseTags = (s) => { try { return JSON.parse(s) ?? [] } catch { return [] } }
 
-export default function DocsTab({ onAsk }) {
+export default function DocsTab({ user, onAsk }) {
   const [docs, setDocs] = useState([])
   const [msg, setMsg] = useState('')
   const [uploading, setUploading] = useState(false)
+  // 上传表单：密级（默认 private 最小暴露面）+ 标签（受控枚举多选）
+  const [upCls, setUpCls] = useState('private')
+  const [upTags, setUpTags] = useState([])
+  // 列表筛选：密级 + 标签（client-side，量级小不做服务端分页）
+  const [fCls, setFCls] = useState('')
+  const [fTag, setFTag] = useState('')
+  // 行内编辑器：编辑目标文档 id + 表单状态；users 仅 admin 可拉取（403 时为空数组）
+  const [editing, setEditing] = useState(null) // { id, classification, tags: [], grants: [] }
+  const [users, setUsers] = useState([])
   const timerRef = useRef(null)
+
+  const isAdmin = user?.role === 'admin'
 
   const load = async () => {
     try {
@@ -68,6 +87,8 @@ export default function DocsTab({ onAsk }) {
     try {
       const fd = new FormData()
       fd.append('file', f)
+      fd.append('classification', upCls)
+      fd.append('tags', upTags.join(','))
       const r = await apiFetch('/api/documents', { method: 'POST', body: fd })
       const j = await r.json()
       if (!r.ok) setMsg(`失败: ${j.error}`)
@@ -87,6 +108,34 @@ export default function DocsTab({ onAsk }) {
     load()
   }
 
+  // 打开行内编辑器：预填当前密级/标签/授权；admin 顺带拉用户列表供授权勾选
+  function openEdit(d) {
+    setEditing({ id: d.id, classification: d.classification ?? 'private', tags: parseTags(d.tags), grants: d.grants ?? [] })
+    if (isAdmin) fetchUsers().then(setUsers).catch(() => setUsers([]))
+  }
+
+  async function saveEdit() {
+    try {
+      const r = await updateDoc(editing.id, {
+        classification: editing.classification,
+        tags: editing.tags,
+        grants: editing.grants,
+      })
+      if (!r.ok) setMsg(`保存失败: ${(await r.json()).error}`)
+      setEditing(null)
+      load()
+    } catch (e) {
+      setMsg(`保存失败: ${e.message}`)
+    }
+  }
+
+  const toggle = (arr, v) => (arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v])
+
+  const visible = useMemo(
+    () => docs.filter((d) => (!fCls || d.classification === fCls) && (!fTag || parseTags(d.tags).includes(fTag))),
+    [docs, fCls, fTag]
+  )
+
   return (
     <div className="docs">
       <div className="upload-bar">
@@ -100,19 +149,57 @@ export default function DocsTab({ onAsk }) {
             hidden
           />
         </label>
-        <span className="hint">支持 md/txt/pdf/docx/csv/json/html，同内容文件自动去重，摄取后台进行</span>
+        <select className="cls-select" value={upCls} onChange={(e) => setUpCls(e.target.value)} title="保密等级">
+          {CLASSIFICATIONS.map((c) => <option key={c} value={c}>{CLS_META[c].text}</option>)}
+        </select>
+        <div className="tag-picker">
+          {TAG_WHITELIST.map((t) => (
+            <button
+              key={t}
+              type="button"
+              className={`tag-chip ${upTags.includes(t) ? 'on' : ''}`}
+              onClick={() => setUpTags((a) => toggle(a, t))}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+        <span className="hint">同内容文件自动去重，默认私有（仅本人可见），摄取后台进行</span>
+      </div>
+      <div className="filter-bar">
+        <button className={`filter-chip ${!fCls && !fTag ? 'on' : ''}`} onClick={() => { setFCls(''); setFTag('') }}>全部</button>
+        {CLASSIFICATIONS.map((c) => (
+          <button key={c} className={`filter-chip ${fCls === c ? 'on' : ''}`} onClick={() => setFCls(fCls === c ? '' : c)}>
+            {CLS_META[c].text}
+          </button>
+        ))}
+        {TAG_WHITELIST.map((t) => (
+          <button key={t} className={`filter-chip ${fTag === t ? 'on' : ''}`} onClick={() => setFTag(fTag === t ? '' : t)}>
+            #{t}
+          </button>
+        ))}
       </div>
       {msg && <div className="doc-msg">{msg}</div>}
       <table>
         <thead>
-          <tr><th>文件名</th><th>大小</th><th>状态</th><th>分块</th><th>入库时间</th><th></th></tr>
+          <tr><th>文件名</th><th>密级/标签</th><th>大小</th><th>状态</th><th>分块</th><th>入库时间</th><th></th></tr>
         </thead>
         <tbody>
-          {docs.map((d) => {
+          {visible.map((d) => {
             const st = STATUS_META[d.status] ?? { text: d.status, cls: '' }
+            const cm = CLS_META[d.classification] ?? { text: d.classification, cls: '' }
+            const mine = !d.owner_name || d.owner_name === (user?.username ?? user) // 归属判定（SSE doc 事件无 owner_name，沿用快照值）
+            const canEdit = isAdmin || mine
             return (
               <tr key={d.id}>
-                <td>{d.filename}</td>
+                <td>
+                  {d.filename}
+                  {!mine && <span className="owner-tag" title={`归属: ${d.owner_name ?? '他人'}${d.owner_dept ? ' · ' + d.owner_dept : ''}`}>{d.owner_name ?? '他人'}</span>}
+                </td>
+                <td>
+                  <span className={`cls-badge ${cm.cls}`}>{cm.text}</span>
+                  {parseTags(d.tags).map((t) => <span key={t} className="doc-tag">{t}</span>)}
+                </td>
                 <td>{(d.size / 1024).toFixed(1)} KB</td>
                 <td>
                   <span className={`doc-status ${st.cls}`} title={d.error || ''}>
@@ -131,16 +218,72 @@ export default function DocsTab({ onAsk }) {
                   >
                     提问
                   </button>
-                  <button className="del" onClick={() => del(d.id)}>删除</button>
+                  {canEdit && <button className="edit" onClick={() => (editing?.id === d.id ? setEditing(null) : openEdit(d))}>设置</button>}
+                  {canEdit && <button className="del" onClick={() => del(d.id)}>删除</button>}
                 </td>
               </tr>
             )
           })}
-          {docs.length === 0 && (
-            <tr><td colSpan="6" className="empty">暂无文档</td></tr>
+          {visible.length === 0 && (
+            <tr><td colSpan="7" className="empty">暂无文档</td></tr>
           )}
         </tbody>
       </table>
+      {editing && (
+        <div className="doc-editor">
+          <div className="editor-row">
+            <label>密级</label>
+            <select
+              value={editing.classification}
+              onChange={(e) => setEditing({ ...editing, classification: e.target.value })}
+            >
+              {CLASSIFICATIONS.map((c) => <option key={c} value={c}>{CLS_META[c].text}</option>)}
+            </select>
+            <span className="hint">
+              {editing.classification === 'public' && '全体登录用户可读'}
+              {editing.classification === 'dept' && '与归属人同部门可读'}
+              {editing.classification === 'private' && '仅本人与被授权用户可读'}
+            </span>
+          </div>
+          <div className="editor-row">
+            <label>标签</label>
+            <div className="tag-picker">
+              {TAG_WHITELIST.map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  className={`tag-chip ${editing.tags.includes(t) ? 'on' : ''}`}
+                  onClick={() => setEditing({ ...editing, tags: toggle(editing.tags, t) })}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+          </div>
+          {isAdmin && users.length > 0 && (
+            <div className="editor-row">
+              <label>授权</label>
+              <div className="tag-picker">
+                {users.filter((u) => u.username !== user?.username).map((u) => (
+                  <button
+                    key={u.id}
+                    type="button"
+                    className={`tag-chip ${editing.grants.includes(u.username) ? 'on' : ''}`}
+                    title={u.dept ? `部门: ${u.dept}` : ''}
+                    onClick={() => setEditing({ ...editing, grants: toggle(editing.grants, u.username) })}
+                  >
+                    {u.username}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="editor-actions">
+            <button className="ask" onClick={saveEdit}>保存</button>
+            <button className="del" onClick={() => setEditing(null)}>取消</button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -21,12 +21,14 @@ import { config } from './config.js'
 import { ensureCollection } from './rag/qdrant.js'
 import { createIngestWorker } from './rag/ingest.js'
 import { seedUsers } from './auth.js'
+import { getUserById } from './store/sqlite.js'
 import healthRoutes from './routes/health.js'
 import authRoutes from './routes/auth.js'
 import documentRoutes from './routes/documents.js'
 import chatRoutes from './routes/chat.js'
 import sessionRoutes from './routes/sessions.js'
 import debugRoutes from './routes/debug.js'
+import adminRoutes from './routes/admin.js'
 import { initObs, flushObs } from './obs/otel.js'
 
 // 启动统一观测层：一次埋点按配置扇出（PHOENIX_ENABLED / LANGFUSE_* 三项）
@@ -53,13 +55,16 @@ if (process.env.JWT_SECRET) {
   app.log.warn('[auth] JWT_SECRET 未配置，使用开发期兜底密钥——生产必须显式设置！')
 }
 await app.register(jwt, { secret: config.auth.jwtSecret })
-// authenticate 装饰器：校验 Bearer token，成功后 req.user = { sub, username }
+// authenticate 装饰器：校验 Bearer token；M10 起 role/dept 每请求查库（JWT 不缓存权限，改角色即刻生效）
 app.decorate('authenticate', async (req, reply) => {
   try {
     await req.jwtVerify()
   } catch {
     return reply.code(401).send({ error: '未登录或登录已过期，请重新登录' })
   }
+  const u = getUserById.get(req.user.sub)
+  if (!u) return reply.code(401).send({ error: '用户不存在，请重新登录' })
+  req.user = { sub: u.id, username: u.username, role: u.role || 'member', dept: u.dept || '' }
 })
 
 // 预置用户播种：AUTH_USERS → users 表（scrypt 哈希，幂等）
@@ -72,10 +77,11 @@ app.register(authRoutes)      // POST /api/auth/login      登录（开放，限
 // 受保护路由组：挂 authenticate 钩子，组内所有路由需携带有效 JWT
 const protectedRoutes = async (api) => {
   api.addHook('preHandler', app.authenticate)
-  api.register(documentRoutes)  // 文档上传 / 列表 / 删除
+  api.register(documentRoutes)  // 文档上传 / 列表 / 删除 / 密级标签授权
   api.register(sessionRoutes)   // 会话列表 / 消息回放 / 删除
   api.register(chatRoutes)      // POST /api/chat            SSE 流式问答（核心）
   api.register(debugRoutes)     // GET  /api/debug/retrieval 裸检索观测（评估/调参）
+  api.register(adminRoutes)     // 用户管理（admin only）
 }
 app.register(protectedRoutes)
 

@@ -62,7 +62,7 @@ docker compose up -d backend frontend
 | `FALLBACK_DIRECT` | true | 知识库为空时通用知识直答（注明） |
 | `MEMORY_WINDOW` | 20 | 会话窗口条数（更早消息滚动摘要压缩） |
 | `JWT_SECRET` | dev-insecure-secret | JWT 签名密钥，生产必须改随机长串 |
-| `AUTH_USERS` | - | 预置用户 `用户名:密码,用户名:密码`，启动播种（不配则无人能登录） |
+| `AUTH_USERS` | - | 预置用户 `用户名:密码[:角色[:部门]]`（M10），角色 member/admin；启动播种（不配则无人能登录） |
 | `LANGFUSE_*` | - | 配置即启用，不配为空壳 |
 | `PHOENIX_ENABLED` / `PHOENIX_ENDPOINT` | false | OTel → Phoenix |
 
@@ -71,16 +71,20 @@ docker compose up -d backend frontend
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/auth/login` | 登录 → `{token}`（唯一开放的写入口，限流 10/min） |
-| POST | `/api/documents` | multipart 上传，202 入队（`duplicated: true` 表示重复） |
-| GET | `/api/documents` | 列表含 `status`(pending/processing/ready/failed)，仅本人文档 |
-| GET | `/api/documents/events` | 摄取进度 SSE（`docs` 快照 + `doc` 单文档进度%），仅本人文档 |
-| DELETE | `/api/documents/:id` | 先删向量再删元数据；摄取中返回 409；他人文档 404 |
-| POST | `/api/chat` | `{question, topK, sessionId?, docId?}` → SSE；docId 限定单文档检索 |
+| POST | `/api/documents` | multipart 上传（可带 `classification`/`tags`），202 入队（`duplicated: true` 表示重复） |
+| GET | `/api/documents` | 可见集合：本人 ∪ public ∪ 同部门(dept) ∪ 被授权；admin 全量 |
+| GET | `/api/documents/events` | 摄取进度 SSE（`docs` 快照 + `doc` 单文档进度%），按可见性推送 |
+| PATCH | `/api/documents/:id` | 密级/标签/授权（`grants`: 用户名数组）；owner 或 admin；ready 文档同步刷 Qdrant payload 即时生效 |
+| DELETE | `/api/documents/:id` | 先删向量再删元数据；摄取中返回 409；不可读文档 404 |
+| POST | `/api/chat` | `{question, topK, sessionId?, docId?}` → SSE；docId 走 canReadDoc 单点判定（不可读 404） |
 | GET | `/api/sessions` · `/:id/messages` · DELETE | 会话管理（按用户隔离，他人会话 404） |
-| GET | `/api/debug/retrieval?q=&topK=` | 裸检索观测（评估数据源/调参用） |
+| GET | `/api/debug/retrieval?q=&topK=` | 裸检索观测（评估数据源/调参用），受 ACL 约束 |
+| GET | `/api/admin/users` · PATCH `/:id` | 用户列表 / 调整角色部门（admin only） |
 | GET | `/api/health` | 健康检查（开放，供容器探活） |
 
-除 `/api/auth/login` 与 `/api/health` 外，所有接口需 `Authorization: Bearer <token>`。知识库检索是共享池（团队知识库语义）：文档管理面按用户隔离，向量检索不做用户过滤。
+除 `/api/auth/login` 与 `/api/health` 外，所有接口需 `Authorization: Bearer <token>`。
+
+**M10 RBAC**：密级三级 `public`（全体登录用户）/ `dept`（同归属人部门）/ `private`（仅 owner + 显式授权），受控标签枚举（技术方案/制度/会议纪要/运维/竞品/测试）。密级下沉为 Qdrant payload 在**召回前服务端过滤**（ownerId/classification/ownerDept），检索后隐藏等于没保护；`canReadDoc`（backend/src/acl.js）是唯一可读性判定单点，不可读一律 404 不泄露存在性；JWT 只放 sub，role/dept 每请求查库（改角色即刻生效）。PATCH 密级同步 `setPayload`，改完即生效无需重摄；启动时对无密级旧点位回填 public（保持升级前可见性）。新上传默认 private。
 
 `POST /api/chat` 事件流：`step`(action/observation，时间线) → `sources`(来源卡片，带全局引用编号) → `delta`(正文 token) ｜ `reasoning`(思维链 token，独立通道) → `usage`(轮次/token/耗时) → `done`(stopReason: normal/max_iter/abort/error) ｜ `error`。
 
@@ -118,8 +122,8 @@ M9 cross-encoder 实验结论（[reranker.js](backend/src/rag/reranker.js) + `re
 ## 目录
 
 ```
-backend/src/  server·config·auth·llm·schema ｜ routes/(auth·chat·documents·sessions·debug·health)
-              rag/(parser·chunker·embedder·tokenizer·qdrant·ingest)
+backend/src/  server·config·auth·acl ｜ routes/(auth·chat·documents·sessions·debug·admin·health)
+              rag/(parser·chunker·embedder·tokenizer·qdrant·ingest·retriever·reranker·websearch)
               agent/(graph·search-graph·tools·prompts·memory) ｜ store/sqlite ｜ obs/otel
 frontend/src/ App ｜ components/(Login·ChatTab·DocsTab) ｜ api(token + SSE 解析)
 scripts/      regression.mjs（回归）· evaluate.mjs（评估）

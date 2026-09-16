@@ -74,7 +74,7 @@ export async function streamDocEvents({ signal, onEvent }) {
   await consumeSSE(res, onEvent)
 }
 
-// 登录：成功即存 token，返回用户名
+// 登录：成功即存 token，返回用户对象 { username, role, dept }
 export async function login(username, password) {
   const res = await fetch('/api/auth/login', {
     method: 'POST',
@@ -84,10 +84,19 @@ export async function login(username, password) {
   const j = await res.json().catch(() => ({}))
   if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`)
   setToken(j.token)
-  return j.username
+  return { username: j.username, role: j.role ?? 'member', dept: j.dept ?? '' }
 }
 
 // 会话管理
 export const fetchSessions = () => apiFetch('/api/sessions').then((r) => r.json())
 export const fetchMessages = (id) => apiFetch(`/api/sessions/${id}/messages`).then((r) => r.json())
 export const removeSession = (id) => apiFetch(`/api/sessions/${id}`, { method: 'DELETE' })
+
+// M10 RBAC：文档密级/标签/授权变更 + admin 用户列表（授权选择器用）
+export const updateDoc = (id, patch) =>
+  apiFetch(`/api/documents/${id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(patch),
+  })
+export const fetchUsers = () => apiFetch('/api/admin/users').then((r) => (r.ok ? r.json() : []))

@@ -17,6 +17,7 @@ import { compressMemory, memoryFallback } from '../agent/memory.js'
 import { rootSpan, runInCtx, flushObs } from '../obs/otel.js'
 import { insertSession, getSession, insertMsg, getMemory, listAfterSeq, getDoc } from '../store/sqlite.js'
 import { countPoints } from '../rag/qdrant.js'
+import { canReadDoc, aclFor } from '../acl.js'
 import { config } from '../config.js'
 
 /**
@@ -46,10 +47,10 @@ export default async function (app) {
     async (req, reply) => {
       const { question, topK = 5, sessionId, docId } = req.body ?? {}
       if (!question?.trim()) return reply.code(400).send({ error: 'question 必填' })
-      // 指定文档问答：docId 必须是本人文档（管理面按用户隔离），否则 404 不泄露存在性
+      // 指定文档问答：docId 必须对当前用户可读（RBAC 单点判定），否则 404 不泄露存在性
       if (docId) {
         const doc = getDoc.get(docId)
-        if (!doc || doc.user_id !== req.user.sub) return reply.code(404).send({ error: '文档不存在' })
+        if (!doc || !canReadDoc(req.user, doc)) return reply.code(404).send({ error: '文档不存在' })
       }
 
       // 会话：无 sessionId（或 sessionId 不属于当前用户）则以首问建新会话
@@ -156,6 +157,7 @@ export default async function (app) {
             emit,
             usageAcc,
             docId, // 指定文档问答范围（可选），贯穿到 search_kb 子图
+            acl: aclFor(req.user), // M10 RBAC：密级/归属/授权的服务端召回前过滤
           })
         )
 

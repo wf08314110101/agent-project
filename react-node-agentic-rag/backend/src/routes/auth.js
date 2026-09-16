@@ -21,7 +21,8 @@ export default async function (app) {
       if (!u) return reply.code(401).send({ error: '用户名或密码错误' })
 
       const token = app.jwt.sign({ sub: u.id, username: u.username }, { expiresIn: '24h' })
-      return { token, username: u.username, expiresIn: 86400 }
+      // M10：返回 role/dept 供前端展示（权限判定以后端为准，前端仅用其显隐 UI）
+      return { token, username: u.username, role: u.role || 'member', dept: u.dept || '', expiresIn: 86400 }
     }
   )
 }

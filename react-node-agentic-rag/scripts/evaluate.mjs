@@ -97,6 +97,7 @@ async function ensureFixtures() {
   for (const f of files) {
     const fd = new FormData()
     fd.append('file', new Blob([readFileSync(join(dir, f))]), f)
+    fd.append('classification', 'public') // M10 RBAC：评估语料对所有用户可读（新上传默认 private）
     const r = await fetch(`${BASE}/api/documents`, { method: 'POST', headers: authHeaders(), body: fd })
     if (r.ok) {
       const j = await r.json().catch(() => ({}))

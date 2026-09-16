@@ -31,18 +31,18 @@ export function checkLogin(username, password) {
 }
 
 /**
- * 启动播种：AUTH_USERS 里的用户逐个入库（ON CONFLICT DO NOTHING 幂等）。
- * 已存在用户不覆盖——改密码需清 users 表或改环境变量用户名。
+ * 启动播种：AUTH_USERS 里的用户逐个入库（幂等）。
+ * 密码只写一次不覆盖；role/dept 每次启动按 env 刷新（改角色/部门改 env 即可）。
  */
 export function seedUsers(log = console) {
   if (!config.auth.users.length) {
-    log.warn?.('[auth] AUTH_USERS 未配置：无人能登录。格式 AUTH_USERS=demo:pass1,alice:pass2')
+    log.warn?.('[auth] AUTH_USERS 未配置：无人能登录。格式 AUTH_USERS=用户名:密码[:角色:部门],…')
     return
   }
   let n = 0
-  for (const { username, password } of config.auth.users) {
+  for (const { username, password, role, dept } of config.auth.users) {
     const before = getUserByName.get(username)
-    upsertUser.run(randomUUID(), username, hashPassword(password))
+    upsertUser.run(randomUUID(), username, hashPassword(password), role, dept)
     if (!before) n++
   }
   // 历史文档回填：M5 前入库的文档（user_id=''）划给首个预置用户，否则无人能管理/删除

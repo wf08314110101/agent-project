@@ -18,6 +18,7 @@ import {
   nextPendingDoc,
   resetProcessing,
   deleteDocRow,
+  getUserById,
 } from '../store/sqlite.js'
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -74,7 +75,15 @@ export function createIngestWorker(log) {
         report('processing', Math.min(90, 15 + Math.round(((i + EMBED_BATCH) / Math.max(1, chunks.length)) * 75)))
       }
       await ensureCollection() // 幂等：集合不存在则创建
-      const n = await indexChunks({ docId: doc.id, filename: doc.filename, chunks, vectors })
+      // M10 RBAC：密级随块写入 payload（召回前服务端过滤的依据）；ownerDept 从 users 表实时取
+      const owner = getUserById.get(doc.user_id)
+      const n = await indexChunks({
+        docId: doc.id,
+        filename: doc.filename,
+        chunks,
+        vectors,
+        acl: { ownerId: doc.user_id, classification: doc.classification ?? 'public', ownerDept: owner?.dept ?? '' },
+      })
 
       setDocChunks.run(n, doc.id)
       setDocStatus.run('ready', null, doc.id)

@@ -69,6 +69,9 @@ CREATE TABLE IF NOT EXISTS doc_grants (
   PRIMARY KEY (doc_id, user_id)
 );
 CREATE INDEX IF NOT EXISTS idx_grants_user ON doc_grants(user_id);
+
+-- M12 多实例：抢占时间戳（宕机后由 stale 回收判定"卡死"的 processing）
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS processing_since TIMESTAMPTZ;
 `
 
 // 启动即初始化 schema；挂 no-op catch 防早期 unhandledRejection，真实错误由首个查询处抛出
@@ -156,22 +159,50 @@ export async function deleteDocRow(id) {
   await q('DELETE FROM documents WHERE id = $1', [id])
 }
 // 状态更新：(status, error, id)；worker 占坑传 ('processing', null)，失败传 ('failed', errMsg)
+// processing 时同步盖 processing_since 时间戳（stale 回收依据），离开 processing 置空
 export async function setDocStatus(status, error, id) {
-  await q('UPDATE documents SET status = $1, error = $2 WHERE id = $3', [status, error, id])
+  await q(
+    `UPDATE documents SET status = $1, error = $2,
+       processing_since = CASE WHEN $1 = 'processing' THEN now() END
+     WHERE id = $3`,
+    [status, error, id]
+  )
 }
 export async function setDocChunks(chunks, id) {
   await q('UPDATE documents SET chunks = $1 WHERE id = $2', [chunks, id])
 }
-// 摄取队列：取最老的一条待处理（单 worker，无需 FOR UPDATE SKIP LOCKED）
-export async function nextPendingDoc() {
-  return (
-    await q(
-      "SELECT * FROM documents WHERE status IN ('pending','processing') ORDER BY created_at ASC LIMIT 1"
+// 摄取队列抢占（M12 多实例）：事务内 SELECT ... FOR UPDATE SKIP LOCKED 抢占最老 pending，
+// 抢到即置 processing（含 processing_since）；并发的其他实例会跳过该行直接抢下一条/空手而归
+export async function claimNextPendingDoc() {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const sel = await client.query(
+      "SELECT * FROM documents WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
     )
-  ).rows[0]
+    const doc = sel.rows[0]
+    if (!doc) {
+      await client.query('COMMIT')
+      return undefined
+    }
+    await client.query(
+      "UPDATE documents SET status = 'processing', processing_since = now() WHERE id = $1",
+      [doc.id]
+    )
+    await client.query('COMMIT')
+    return doc
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => { })
+    throw e
+  } finally {
+    client.release()
+  }
 }
+// 宕机回收：仅回收"卡在 processing 超过 30 分钟"的文档（多实例下误回收他实例在途任务的最小风险窗口）
 export async function resetProcessing() {
-  await q("UPDATE documents SET status = 'pending' WHERE status = 'processing'")
+  await q(
+    "UPDATE documents SET status = 'pending', processing_since = NULL WHERE status = 'processing' AND processing_since < now() - interval '30 minutes'"
+  )
 }
 
 // ---- doc_grants：显式授权（private/dept 文档可单独授权给指定用户）----

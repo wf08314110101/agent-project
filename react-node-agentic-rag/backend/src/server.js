@@ -17,9 +17,11 @@ import cors from '@fastify/cors'
 import multipart from '@fastify/multipart' // 文件上传（multipart/form-data）支持
 import rateLimit from '@fastify/rate-limit'
 import jwt from '@fastify/jwt'
+import Redis from 'ioredis'
 import { config } from './config.js'
 import { ensureCollection } from './rag/qdrant.js'
 import { createIngestWorker } from './rag/ingest.js'
+import { closeBus } from './rag/bus.js'
 import { seedUsers } from './auth.js'
 import { getUserById } from './store/pg.js'
 import healthRoutes from './routes/health.js'
@@ -42,11 +44,20 @@ const app = Fastify({
 // ---- 插件注册（await 确保顺序：cors/multipart/rate-limit 先于路由生效）----
 await app.register(cors, { origin: config.corsOrigin })
 await app.register(multipart)
-await app.register(rateLimit, {
+// M12 限流共享：配 REDIS_URL 时计数走 Redis（多实例全局限流一致），缺省退回进程内存
+const rateLimitOpts = {
   global: true,                        // 全局限流对所有路由生效
   max: config.rate.globalMax,          // 每分钟最大请求数
   timeWindow: '1 minute',
-})
+}
+let redis = null
+if (config.redis.url) {
+  redis = new Redis(config.redis.url, { maxRetriesPerRequest: 2 })
+  redis.on('error', (e) => app.log.error(`[redis] 限流连接错误: ${e.message}`))
+  rateLimitOpts.redis = redis
+  app.log.info(`[redis] 限流/事件共享已启用 → ${config.redis.url}`)
+}
+await app.register(rateLimit, rateLimitOpts)
 
 // ---- JWT 鉴权 ----
 if (process.env.JWT_SECRET) {
@@ -102,6 +113,8 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, async () => {
     await ingest.stop()
     await app.close()
+    if (redis) redis.disconnect()
+    await closeBus() // 冲刷/关闭 Redis pub-sub 连接
     await flushObs() // 冲刷观测队列，防止尾部 span 丢失
     process.exit(0)
   })

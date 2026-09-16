@@ -28,6 +28,10 @@ export const config = {
   pg: {
     url: env('DATABASE_URL', 'postgres://rag:rag123@localhost:5432/rag'), // Postgres 连接串（文档元数据/会话/消息）
   },
+  // ---- M12 多实例共享态（可选）：非空即启用（限流计数共享 + 摄取事件广播），缺省退回进程内存 ----
+  redis: {
+    url: env('REDIS_URL', ''),
+  },
   uploadsDir: env('UPLOADS_DIR', './data/uploads'),           // 摄取队列暂存原件（worker 处理完即删）
 
   // ---- 限流（每分钟）：全局 + chat 单独收紧 ----

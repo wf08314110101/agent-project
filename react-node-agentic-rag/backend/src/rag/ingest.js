@@ -1,21 +1,21 @@
 // ============================================================================
 // 摄取队列：单并发 worker（嵌入是 CPU 密集，避免争抢）
 // ----------------------------------------------------------------------------
-// 状态流转：pending → processing → ready | failed(error)；重启时 processing 重置回 pending
-// 职责：从 SQLite 取最老的 pending 文档 → 解析 → 切块 → 嵌入 → 写入 Qdrant → 更新状态。
+// 状态流转：pending → processing → ready | failed(error)；卡死 30 分钟的 processing 由 stale 回收重置回 pending
+// 职责：事务抢占（FOR UPDATE SKIP LOCKED，多实例安全）最老的 pending 文档 → 解析 → 切块 → 嵌入 → 写入 Qdrant → 更新状态。
 // 唤醒机制：worker 常驻循环，"事件唤醒 + 定时兜底轮询"双保险，新文档入队即刻处理。
 // ============================================================================
 
 import fs from 'node:fs/promises'
-import { EventEmitter } from 'node:events'
 import { parseFile } from './parser.js'
 import { chunkText } from './chunker.js'
 import { embed } from './embedder.js'
 import { ensureCollection, indexChunks } from './qdrant.js'
+import { publishDocEvent, ingestBus } from './bus.js'
 import {
   setDocStatus,
   setDocChunks,
-  nextPendingDoc,
+  claimNextPendingDoc,
   resetProcessing,
   deleteDocRow,
   getUserById,
@@ -23,10 +23,8 @@ import {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-// 摄取进度事件总线：worker 发 doc 事件，SSE 端点订阅后推给前端（替代轮询）
-// 事件形状：{ id, filename, user_id, status, progress, chunks?, error? }
-export const ingestBus = new EventEmitter()
-ingestBus.setMaxListeners(50) // SSE 订阅者随在线用户数增长，放宽默认 10 的告警阈值
+// ingestBus 由 bus.js 提供（本地订阅端点；多实例时事件经 Redis 广播回流），re-export 供 SSE 路由使用
+export { ingestBus }
 
 // 嵌入批大小：CPU 密集，小批多次既保内存可控，又给进度事件提供上报粒度
 const EMBED_BATCH = 16
@@ -53,10 +51,11 @@ export function createIngestWorker(log) {
    * 任何一步失败都会把文档标记为 failed(error)，不中断 worker。
    */
   async function processDoc(doc) {
-    await setDocStatus('processing', null, doc.id) // 先占坑，防止重复消费
-    // 进度上报：解析前 5%，解析完 15%，按嵌入批次推进到 90%，入库后 100%
+    // 抢占时已置 processing（claimNextPendingDoc），这里仅刷新状态兜底（幂等）
+    await setDocStatus('processing', null, doc.id)
+    // 进度上报：解析前 5%，解析完 15%，按嵌入批次推进到 90%，入库后 100%（经 Redis 广播到全部实例）
     const report = (status, progress, extra = {}) =>
-      ingestBus.emit('doc', { id: doc.id, filename: doc.filename, user_id: doc.user_id, status, progress, ...extra })
+      publishDocEvent({ id: doc.id, filename: doc.filename, user_id: doc.user_id, status, progress, ...extra })
     report('processing', 5)
     try {
       const buf = await fs.readFile(doc.path)
@@ -98,10 +97,10 @@ export function createIngestWorker(log) {
     }
   }
 
-  // 主循环：有任务就处理，没任务就等待唤醒；alive=false 退出
+  // 主循环：有任务就处理（事务抢占，多实例安全），没任务就等待唤醒；alive=false 退出
   async function loop() {
     while (alive) {
-      const doc = await nextPendingDoc()
+      const doc = await claimNextPendingDoc()
       if (!doc) {
         await waitForWork()
         continue
@@ -111,7 +110,7 @@ export function createIngestWorker(log) {
   }
 
   return {
-    /** 启动 worker：先把卡在 processing 的文档重置回 pending（宕机恢复），再进入循环 */
+    /** 启动 worker：先回收卡死 30 分钟的 processing 文档（宕机恢复，多实例安全），再进入循环 */
     async start() {
       await resetProcessing() // 宕机恢复
       alive = true

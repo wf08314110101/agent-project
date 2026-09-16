@@ -18,8 +18,9 @@ import { toSparse } from './tokenizer.js'
 // 共享客户端实例：15s 超时防止 Qdrant 卡死拖垮请求
 export const qdrant = new QdrantClient({ url: config.qdrantUrl, timeout: 15_000 })
 
-// 稀疏路召回上限：RRF 只看排名不看绝对分，双路各多召回一些再融合，最后截 topK
-const prefetchLimit = (k) => Math.max(k * 3, 12)
+// 稀疏路召回上限：融合只看排名/分数，双路各多召回一些再融合，最后截 topK
+// mul 为实验参数（RETRIEVE_PREFETCH_MUL），0 = 默认策略 max(k*3, 12)
+const prefetchLimit = (k, mul) => (mul ? k * mul : Math.max(k * 3, 12))
 
 /**
  * 幂等创建集合：稠密向量（config.embed.dim，Cosine）+ 稀疏向量（IDF modifier）。
@@ -77,38 +78,59 @@ export async function indexChunks({ docId, filename, chunks, vectors }) {
 }
 
 /**
- * 混合检索：稠密语义路 + 稀疏关键词路 → 服务端 RRF 融合
+ * 混合检索：稠密语义路 + 稀疏关键词路 → 服务端融合
  * @param {object}   p
  * @param {string}   p.text    - 查询原文（分词构建稀疏向量）
  * @param {number[]} p.vector  - 查询稠密向量（已归一化）
  * @param {number}   p.limit   - 返回条数（默认 5）
  * @param {string}   [p.docId] - 指定文档过滤（「对此文档提问」），空则检索全库
+ * @param {'rrf'|'dbsf'} [p.fusion]     - 融合算法（M8 实验：rrf 排名融合 / dbsf 绝对分融合）
+ * @param {number}   [p.prefetchMul]    - 召回池倍率（0/缺省 = 默认 max(k*3,12)）
+ * @param {'none'|'dense'} [p.rerank]   - dense rescore：召回池并集按稠密语义分精排
  * @returns {Promise<{hits: Array, mode: string}>} 融合后 topK；
- *          mode = 'hybrid-rrf' | 'dense-fallback'（稀疏路故障时退化，阈值语义回到余弦分）
+ *          mode = 'hybrid-rrf' | 'hybrid-dbsf' | 'hybrid-rrf+dense' | 'dense-fallback'
  */
-export async function hybridSearch({ text, vector, limit = 5, docId }) {
-  const k = prefetchLimit(limit)
+export async function hybridSearch({ text, vector, limit = 5, docId, fusion = config.retrieveFusion, prefetchMul = 0, rerank = 'none' }) {
+  const k = prefetchLimit(limit, prefetchMul)
   // docId 范围过滤：挂顶层 filter（融合后生效），两路 prefetch 天然都被约束
   const scope = docId ? { filter: { must: [{ key: 'docId', match: { value: docId } }] } } : {}
+  const sparseVec = toSparse(text)
+  const fetch2 = [
+    // 稠密路：语义相似；阈值粗滤在服务端做（余弦分量纲，仅此路有效）
+    { query: vector, using: 'dense', limit: k, threshold: config.retrieveMinScore },
+    // 稀疏路：字面/BM25 匹配，无需阈值（BM25 分数量纲与余弦无关）
+    { query: sparseVec, using: 'sparse', limit: k },
+  ]
+  // 外层 query：默认按融合算法合并；dense rescore 模式改为在「dense ∪ sparse ∪ RRF 前列」
+  // 三路并集上按稠密语义分精排——验证"字面召回池 + 语义精排"对字面强命中的歧义题的效果
+  const params = rerank === 'dense'
+    ? {
+        prefetch: [...fetch2, { prefetch: fetch2, query: { fusion: 'rrf' }, limit: k }],
+        query: vector,
+        using: 'dense',
+        limit,
+        with_payload: true,
+        ...scope,
+      }
+    : {
+        prefetch: fetch2,
+        query: { fusion },
+        limit,
+        with_payload: true,
+        ...scope,
+      }
   try {
-    const { points: hits } = await qdrant.query(config.qdrantCollection, {
-      prefetch: [
-        // 稠密路：语义相似；阈值粗滤在服务端做（余弦分量纲，仅此路有效）
-        { query: vector, using: 'dense', limit: k, threshold: config.retrieveMinScore },
-        // 稀疏路：字面/BM25 匹配，无需阈值（BM25 分数量纲与余弦无关）
-        { query: toSparse(text), using: 'sparse', limit: k },
-      ],
-      query: { fusion: 'rrf' }, // 倒数排名融合：score = Σ 1/(60+rank)，只代表融合排名
-      limit,
-      with_payload: true, // 命中必须带 payload 才能拼装引用
-      ...scope,
-    })
-    return { mode: 'hybrid-rrf', hits: hits.map((h) => ({ score: h.score, ...h.payload })) }
+    const { points: hits } = await qdrant.query(config.qdrantCollection, params)
+    return {
+      mode: rerank === 'dense' ? 'hybrid-rrf+dense' : `hybrid-${fusion}`,
+      hits: hits.map((h) => ({ score: h.score, ...h.payload })),
+    }
   } catch (e) {
     // 稀疏路不可用（旧集合/服务端不支持）：退化为纯稠密检索，保持可用性
-    console.warn(`[qdrant] 混合检索失败，退化纯稠密: ${e.message}`)
+    console.warn(`[qdrant] 混合检索失败，退化纯稠密: ${e?.data?.status?.error ?? e.message}`)
     const { points: hits } = await qdrant.query(config.qdrantCollection, {
       query: vector,
+      using: 'dense', // 集合为命名向量，必须显式指定（缺省默认空名会 400）
       limit,
       with_payload: true,
       ...scope,

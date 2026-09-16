@@ -56,6 +56,7 @@ docker compose up -d backend frontend
 | `RETRIEVE_MIN_SCORE` | 0.3 | 稠密路相似度阈值（RRF 融合分不再二次过滤） |
 | `AGENT_MAX_ITERATIONS` / `SEARCH_MAX_ATTEMPTS` | 6 / 2 | 主图轮数上限 / 检索重试上限 |
 | `WEB_SEARCH_PROVIDER` | bing | 网络兜底搜索源：bing（免 key）/ tavily（需 key）/ off（关闭） |
+| `RETRIEVE_FUSION` / `RETRIEVE_PREFETCH_MUL` | rrf / 0 | 服务端融合算法（rrf / dbsf）/ 召回池倍率（M8 rerank 实验开关） |
 | `TAVILY_API_KEY` / `WEB_SEARCH_MAX_RESULTS` / `WEB_SEARCH_TIMEOUT_MS` | - / 4 / 8000 | tavily key / 兜底抓取条数 / 单次搜索超时 |
 | `RATE_LIMIT_MAX` / `CHAT_RATE_LIMIT_MAX` | 120 / 20 | 每分钟限流 |
 | `FALLBACK_DIRECT` | true | 知识库为空时通用知识直答（注明） |
@@ -100,6 +101,8 @@ node scripts/evaluate.mjs --layer retrieval --assert "recall>=0.85,mrr>=0.7,puri
 ```
 
 检索调参流程：改 `RETRIEVE_MIN_SCORE` / chunk 策略 / rerank 前跑一次存基线，改完 `--baseline` 对比数字。基线（34 题扩容集）：recall@5=1.0，MRR=0.985，purity=1，mustOkRate=1，faithfulness=0.994（竞争文档歧义题 mrr=0.5，是 rerank 实验的靶子）。注意：批量摄取后等 Qdrant 索引优化结束再评估，否则 HNSW 未收敛数字会抖。
+
+M8 rerank 实验结论（`scripts/rerank-exp.mjs`，34 题 × 5 组合）：dbsf / 召回池×8 / dense 精排三种服务端策略 MRR 均在 0.971~0.985 打平（差异=1 题 rank，无显著性），**歧义题 rr=0.50 在所有策略下不变——「旧版检索基线」块语义字面双近，属语料级歧义，服务端排序无解**，后续方向是 cross-encoder 客户端 rerank 或语料治理。实验参数保留为 `RETRIEVE_FUSION` / `RETRIEVE_PREFETCH_MUL` 开关，默认维持 rrf。实验顺带修了两个潜伏 bug：dense-fallback 退化查询缺 `using:'dense'`（命名向量集合下必 400）；warn 现在带服务端 detail。
 
 ## 已知坑（复盘）
 

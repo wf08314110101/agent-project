@@ -54,6 +54,9 @@ export const config = {
 
   // ---- 检索阈值：相似度低于该分数的结果直接丢弃（粗过滤噪声）----
   retrieveMinScore: Number(env('RETRIEVE_MIN_SCORE', '0.3')),
+  // ---- M8 rerank 实验开关：服务端融合算法与召回池大小（实验结论写入 README 后固化默认值）----
+  retrieveFusion: env('RETRIEVE_FUSION', 'rrf'),        // rrf（排名融合，默认）| dbsf（绝对分融合，1.11+）
+  retrievePrefetchMul: Number(env('RETRIEVE_PREFETCH_MUL', '0')), // 召回池倍率，0 = 默认 max(k*3, 12)
 
   // ---- Agent 行为控制 ----
   agent: {

@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { hybridSearch } from '../backend/src/rag/qdrant.js'
 import { embed } from '../backend/src/rag/embedder.js'
+import { rerank } from '../backend/src/rag/reranker.js'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const cases = readFileSync(path.join(root, 'evals/golden.jsonl'), 'utf8')
@@ -24,10 +25,10 @@ const hitChunk = (c, kws) => kws.some((kw) => `${c.title ?? ''}${c.text}`.includ
 
 const variants = [
   { name: 'rrf(基线)', opts: {} },
-  { name: 'rrf+池x8', opts: { prefetchMul: 8 } },
-  { name: 'dbsf', opts: { fusion: 'dbsf' } },
-  { name: 'dbsf+池x8', opts: { fusion: 'dbsf', prefetchMul: 8 } },
-  { name: 'rrf+dense精排', opts: { rerank: 'dense', prefetchMul: 8 } },
+  { name: 'rrf池20截断', pool: 20 }, // 对照：池拉大但无精排（观察池扩本身的影响）
+  // cross-encoder 精排：召回池拉大（limit=20）→ (query,块) 联合编码重排 → top5
+  { name: 'rrf池20+CE', pool: 20, post: (q, hits) => rerank(q, hits, { topK: 5 }) },
+  { name: 'dbsf池20+CE', pool: 20, opts2: { fusion: 'dbsf' }, post: (q, hits) => rerank(q, hits, { topK: 5 }) },
 ]
 
 const vectors = await embed(cases.map((c) => c.question))
@@ -42,15 +43,23 @@ for (const v of variants) {
     const t0 = performance.now()
     let hits, mode
     try {
-      ;({ hits, mode } = await hybridSearch({ text: cases[i].question, vector: vectors[i], limit: 5, ...v.opts }))
+      if (v.pool) {
+        // 池拉大变体：候选池 limit=20，CE 变体再经 post() 精排截 top5
+        ;({ hits, mode } = await hybridSearch({
+          text: cases[i].question, vector: vectors[i], limit: v.pool, ...(v.opts2 ?? {}),
+        }))
+      } else {
+        ;({ hits, mode } = await hybridSearch({ text: cases[i].question, vector: vectors[i], limit: 5, ...v.opts }))
+      }
+      if (v.post) hits = await v.post(cases[i].question, hits)
     } catch (e) {
       // 实验不容静默退化：主查询失败直接报出服务端 detail 与定位信息
-      console.error(`[${v.name}] 第${i + 1}题「${cases[i].question}」主查询失败:`,
+      console.error(`[${v.name}] 第${i + 1}题「${cases[i].question}」失败:`,
         JSON.stringify(e?.data?.status?.error ?? e.message))
       process.exit(1)
     }
     ms += performance.now() - t0
-    if (mode === 'dense-fallback') fails.push(`Q${i + 1}「${cases[i].question.slice(0, 20)}」`)
+    if (mode === 'dense-fallback') fails.push(`Q${i + 1}`)
     const first = hits.findIndex((h) => hitChunk(h, cases[i].expect))
     const rr = first < 0 ? 0 : 1 / (first + 1)
     rrSum += rr

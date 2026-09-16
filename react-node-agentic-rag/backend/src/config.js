@@ -58,6 +58,12 @@ export const config = {
   retrieveFusion: env('RETRIEVE_FUSION', 'rrf'),        // rrf（排名融合，默认）| dbsf（绝对分融合，1.11+）
   retrievePrefetchMul: Number(env('RETRIEVE_PREFETCH_MUL', '0')), // 召回池倍率，0 = 默认 max(k*3, 12)
 
+  // ---- M9 cross-encoder rerank（客户端精排）----
+  rerank: {
+    model: env('RERANK_MODEL', 'Xenova/bge-reranker-base'), // 中英 cross-encoder（Xenova ONNX 转换）
+    dtype: env('RERANK_DTYPE', 'q8'),                       // 量化精度：q8 体积小速度快，fp32 更准
+  },
+
   // ---- Agent 行为控制 ----
   agent: {
     maxIterations: int('AGENT_MAX_ITERATIONS', 6),   // 主图最大轮数（防死循环；超过则强制直答）

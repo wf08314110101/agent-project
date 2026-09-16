@@ -104,6 +104,8 @@ node scripts/evaluate.mjs --layer retrieval --assert "recall>=0.85,mrr>=0.7,puri
 
 M8 rerank 实验结论（`scripts/rerank-exp.mjs`，34 题 × 5 组合）：dbsf / 召回池×8 / dense 精排三种服务端策略 MRR 均在 0.971~0.985 打平（差异=1 题 rank，无显著性），**歧义题 rr=0.50 在所有策略下不变——「旧版检索基线」块语义字面双近，属语料级歧义，服务端排序无解**，后续方向是 cross-encoder 客户端 rerank 或语料治理。实验参数保留为 `RETRIEVE_FUSION` / `RETRIEVE_PREFETCH_MUL` 开关，默认维持 rrf。实验顺带修了两个潜伏 bug：dense-fallback 退化查询缺 `using:'dense'`（命名向量集合下必 400）；warn 现在带服务端 detail。
 
+M9 cross-encoder 实验结论（[reranker.js](backend/src/rag/reranker.js) + `rerank-exp.mjs`，bge-reranker-base q8 本地 CPU）：召回池 20 → CE 重排 top5，**MRR 反降（0.985→0.934）、Q1 仍 rr=0.50、时延 5.5s/题——不接入生产**。Q1 的 CE logit 分布给出根因实锤：「旧版检索基线·已知问题」块（罗列纯向量检索缺点）logit 最高 3.62——它语义上真的在回答「为什么纯向量不好」；而正确答案块「混合检索原理」logit=-1.86 排第 9。**题目「检索用什么模式？为什么比纯向量好」在当前语料下存在双解读，多种「相关」都成立**——这是题目/语料设计问题，任何排序器都无解；正解是语料治理（旧版文档加显式废弃标注）或题目拆分。reranker.js 与 `RERANK_MODEL`/`RERANK_DTYPE` 配置保留为实验工具。
+
 ## 已知坑（复盘）
 
 1. `@qdrant/js-client-rest@1.19`：`upsert` 需 `{points:[...]}` 包装；`search()` 已删除改 `query()`（返回 `{points}`）

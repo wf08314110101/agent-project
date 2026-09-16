@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch src/server.js",
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "test": "node --test --experimental-test-module-mocks 'test/*.test.mjs'"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.1",

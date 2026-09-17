@@ -192,22 +192,22 @@ export default async function (app) {
           JSON.stringify({ sources, steps, usage, stopReason: result.stopReason ?? 'normal' })
         )
 
-        // 收尾事件：先 usage 后 done，前端按 done 收尾 UI
+        // 收尾事件：先 usage 后 done，前端按 done 收尾 UI；traceId 供评估脚本 score 回填关联
         send('usage', { elapsedSec: elapsed, rounds: result.stepCount, ...usage })
-        send('done', { stopReason: result.stopReason ?? 'normal', sessionId: session.id })
+        send('done', { stopReason: result.stopReason ?? 'normal', sessionId: session.id, traceId: root.traceId })
       } catch (e) {
         if (clientGone) {
           // 用户主动关闭页面 → 静默收尾，不算服务端错误
           root.setAttr('langfuse.observation.level', 'WARNING')
           root.setAttr('langfuse.status_message', '客户端中断')
-          send('done', { stopReason: 'abort', sessionId: session.id })
+          send('done', { stopReason: 'abort', sessionId: session.id, traceId: root.traceId })
         } else {
           // 服务端错误 → 记日志 + error/done 事件通知前端
           req.log.error(e)
           root.setAttr('langfuse.observation.level', 'ERROR')
           root.setAttr('langfuse.status_message', e.message)
           send('error', { message: e.message })
-          send('done', { stopReason: 'error', sessionId: session.id })
+          send('done', { stopReason: 'error', sessionId: session.id, traceId: root.traceId })
         }
       } finally {
         // 无论成败：结束根 span → 关闭 SSE 流 → 冲刷观测数据

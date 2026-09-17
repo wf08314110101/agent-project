@@ -26,7 +26,8 @@ React 5174 ──SSE── Fastify 8788 ──┬── DeepSeek (LLM, 工具调
 - **引用锚点**：检索块全局唯一编号，回答行内 [n] 可点击跳转对应来源卡片；指定文档问答（DocsTab「提问」→ 仅在该文档范围检索）
 - **会话**：多轮上下文（超窗滚动摘要压缩，seq 断点零丢失）、消息+步骤+来源持久化回放、会话增删
 - **思维链通道**：reasoning token 走独立 SSE 事件（deepseek-reasoner 等模型自动生效），前端折叠面板展示，不与正文混流
-- **鉴权**：预置用户 + JWT 登录（scrypt 存储密码，24h 有效期），会话/文档按用户隔离；登录接口单独限流
+- **鉴权**：预置用户 + JWT 登录（scrypt 存储密码），会话/文档按用户隔离；登录接口单独限流
+- **无状态鉴权（M14）**：access JWT 短效（payload 携带 role/dept/ver，authenticate 零查库）+ token_ver 即刻失效（改权限 bump，旧 token 立即 401，ver 走 Redis/内存两级缓存）+ refresh token 单活旋转（sha256 落库，前端 401 自续期重放）
 - **可观测**：单一 OTel 管道双导出——Langfuse trace/span/usage + Phoenix OpenInference，一次埋点两平台同构
 - **MCP 服务化（M13）**：知识库暴露为 MCP Server，Cursor/Claude Code/Trae/Inspector 等客户端直连检索；4 个只读工具 + 全文 Resource，双传输 stdio（独立进程）/ Streamable HTTP（Bearer）；ACL 与 Web 端同源（canReadDoc/aclFor，密级召回前过滤）
 - **生产防线**：限流（全局 120/min、chat 20/min、login 10/min）、知识库为空降级直答、坏用例回归脚本、容器化部署（compose 健康检查依赖）、CI（回归 + 镜像构建）
@@ -64,6 +65,7 @@ docker compose up -d backend frontend
 | `FALLBACK_DIRECT` | true | 知识库为空时通用知识直答（注明） |
 | `MEMORY_WINDOW` | 20 | 会话窗口条数（更早消息滚动摘要压缩） |
 | `JWT_SECRET` | dev-insecure-secret | JWT 签名密钥，生产必须改随机长串 |
+| `JWT_ACCESS_TTL` / `JWT_REFRESH_DAYS` | 15m / 30 | access 短效期（M14 无状态校验）/ refresh 有效期天数（单活旋转） |
 | `AUTH_USERS` | - | 预置用户 `用户名:密码[:角色[:部门]]`（M10），角色 member/admin；启动播种（不配则无人能登录） |
 | `MCP_ENABLED` / `MCP_ACCESS_USER` / `MCP_HTTP_TOKEN` | true / - / - | MCP Server（M13）：服务身份用户名（空 = 仅 public 匿名）/ 非空才挂 `POST /mcp`（Bearer）；stdio 入口不受这两项控制 |
 | `LANGFUSE_*` | - | 配置即启用，不配为空壳 |

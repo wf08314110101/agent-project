@@ -5,6 +5,7 @@
 const BASE = process.env.BASE_URL || 'http://localhost:8788'
 const AUTH_USER = process.env.AUTH_USER || 'demo'
 const AUTH_PASS = process.env.AUTH_PASS || 'demo123'
+import { lfScoreTrace, lfRunSummary } from './lib/lf-scores.mjs'
 
 // ---------- 鉴权 ----------
 let TOKEN = ''
@@ -166,8 +167,9 @@ try {
 
 for (const c of cases) {
   const t0 = Date.now()
+  let r = null
   try {
-    const r = await chat({ question: c.q })
+    r = await chat({ question: c.q })
     c.check(r)
     const sec = ((Date.now() - t0) / 1000).toFixed(1)
     pass++
@@ -176,7 +178,19 @@ for (const c of cases) {
     failures.push(c.name)
     console.log(`❌ ${c.name} → ${e.message}`)
   }
+  // 逐用例分数回填 Langfuse（traceId 缺失=观测未启用 → 跳过；失败不伤回归主流程）
+  await lfScoreTrace(r?.done?.traceId, 'regression.pass', r && !failures.includes(c.name) ? 1 : 0, {
+    dataType: 'BOOLEAN',
+    comment: c.name,
+  })
 }
 
 console.log(`\n结果: ${pass}/${cases.length} 通过${failures.length ? `，失败: ${failures.join('、')}` : ''}\n`)
+
+// 运行汇总回填：一条 run trace 挂通过率（未配置 LANGFUSE_* 时 no-op）
+await lfRunSummary({
+  name: 'regression',
+  metadata: { base: BASE, total: cases.length, failures },
+  scores: [{ name: 'regression.pass_rate', value: +(pass / cases.length).toFixed(3) }],
+})
 process.exit(failures.length ? 1 : 0)

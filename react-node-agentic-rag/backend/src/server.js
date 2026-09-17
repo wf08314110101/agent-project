@@ -22,8 +22,7 @@ import { config } from './config.js'
 import { ensureCollection } from './rag/qdrant.js'
 import { createIngestWorker } from './rag/ingest.js'
 import { closeBus } from './rag/bus.js'
-import { seedUsers } from './auth.js'
-import { getUserById } from './store/pg.js'
+import { seedUsers, initAuthCache, currentTokenVer } from './auth.js'
 import healthRoutes from './routes/health.js'
 import authRoutes from './routes/auth.js'
 import documentRoutes from './routes/documents.js'
@@ -59,6 +58,7 @@ if (config.redis.url) {
   app.log.info(`[redis] 限流/事件共享已启用 → ${config.redis.url}`)
 }
 await app.register(rateLimit, rateLimitOpts)
+initAuthCache(redis) // M14：token_ver 校验的多实例共享缓存（未配 Redis 退回进程内存）
 
 // ---- JWT 鉴权 ----
 if (process.env.JWT_SECRET) {
@@ -67,16 +67,20 @@ if (process.env.JWT_SECRET) {
   app.log.warn('[auth] JWT_SECRET 未配置，使用开发期兜底密钥——生产必须显式设置！')
 }
 await app.register(jwt, { secret: config.auth.jwtSecret })
-// authenticate 装饰器：校验 Bearer token；M10 起 role/dept 每请求查库（JWT 不缓存权限，改角色即刻生效）
+// authenticate 装饰器（M14 无状态化）：JWT 携带 role/dept/ver，不再每请求查库；
+// 只比对 token_ver（两级缓存：Redis/内存 → pg 兜底），改权限 bump ver → 旧 token 立即 401
 app.decorate('authenticate', async (req, reply) => {
   try {
     await req.jwtVerify()
   } catch {
     return reply.code(401).send({ error: '未登录或登录已过期，请重新登录' })
   }
-  const u = await getUserById(req.user.sub)
-  if (!u) return reply.code(401).send({ error: '用户不存在，请重新登录' })
-  req.user = { sub: u.id, username: u.username, role: u.role || 'member', dept: u.dept || '' }
+  const ver = await currentTokenVer(req.user.sub)
+  if ((req.user.ver ?? 0) !== ver) {
+    return reply.code(401).send({ error: '权限已变更，请重新登录' })
+  }
+  // role/dept 直接取 JWT payload（签发时查库写入，权限变更经 ver 失效保证不过期使用）
+  req.user = { sub: req.user.sub, username: req.user.username, role: req.user.role || 'member', dept: req.user.dept || '' }
 })
 
 // 预置用户播种：AUTH_USERS → users 表（scrypt 哈希，幂等）

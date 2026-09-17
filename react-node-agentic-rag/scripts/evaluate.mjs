@@ -15,9 +15,10 @@
 // 产物：evals/results/<时间戳>.json（逐题明细 + 汇总），终端打印汇总表与 diff
 // ============================================================================
 
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, existsSync } from 'node:fs'
-import { dirname, join, basename } from 'node:path'
+import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs'
+import { join, dirname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { lfScoreTrace, lfRunSummary } from './lib/lf-scores.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const BASE = process.env.BASE_URL || 'http://localhost:8788'
@@ -214,8 +215,15 @@ async function runAnswer(items) {
       tokens: r.usage?.totalTokens ?? null,
       elapsedSec: r.usage?.elapsedSec ?? null,
       stopReason: r.done?.stopReason ?? '?',
+      traceId: r.done?.traceId ?? null, // score 回填关联键（观测未启用时为 null）
     })
     process.stdout.write(`  [${rows.length}/${items.length}] must=${mustOk ? 'Y' : 'N'} faith=${faith?.score ?? '-'} rel=${rel?.score ?? '-'} ${it.question.slice(0, 22)}\n`)
+  }
+  // 逐题分数回填 Langfuse（traceId 缺失则跳过；失败不伤评估）
+  for (const r of rows) {
+    await lfScoreTrace(r.traceId, 'answer.must_ok', r.mustOk ? 1 : 0, { dataType: 'BOOLEAN', comment: r.question })
+    if (r.faithfulness != null) await lfScoreTrace(r.traceId, 'answer.faithfulness', r.faithfulness, { comment: r.question })
+    if (r.relevance != null) await lfScoreTrace(r.traceId, 'answer.relevance', r.relevance, { comment: r.question })
   }
   const faiths = rows.map((r) => r.faithfulness).filter((v) => v != null)
   const rels = rows.map((r) => r.relevance).filter((v) => v != null)
@@ -255,6 +263,28 @@ if (LAYER !== 'retrieval') {
   const s = result.answer.summary
   console.log(`mustOkRate=${s.mustOkRate}  faithfulness=${s.faithfulness}  relevance=${s.relevance}  tokens=${s.totalTokens}`)
 }
+
+// 运行汇总回填 Langfuse：一条 run trace 挂聚合分（未配置 LANGFUSE_* 时 no-op）
+await lfRunSummary({
+  name: `eval-${LAYER}`,
+  metadata: { base: BASE, layer: LAYER, topK: TOPK, questions: golden.length, ts: new Date().toISOString() },
+  scores: [
+    ...(result.retrieval
+      ? [
+          { name: 'retrieval.recall@5', value: result.retrieval.summary.recall },
+          { name: 'retrieval.mrr', value: result.retrieval.summary.mrr },
+          { name: 'retrieval.purity', value: result.retrieval.summary.purity },
+        ]
+      : []),
+    ...(result.answer
+      ? [
+          { name: 'answer.mustOkRate', value: result.answer.summary.mustOkRate },
+          { name: 'answer.faithfulness', value: result.answer.summary.faithfulness },
+          { name: 'answer.relevance', value: result.answer.summary.relevance },
+        ].filter((s) => s.value != null)
+      : []),
+  ],
+})
 
 // 存档 + 基线对比
 mkdirSync(join(ROOT, 'evals/results'), { recursive: true })

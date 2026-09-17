@@ -89,10 +89,14 @@ export const config = {
     windowSize: int('MEMORY_WINDOW', 20), // 回放窗口：最近 N 条原文恒在上下文（+未压缩真空区，零丢失）
   },
 
-  // ---- 鉴权（M5 方案 C：预置用户 + JWT 登录）----
+  // ---- 鉴权（M5 方案 C：预置用户 + JWT 登录；M14 起 access 短效 + refresh 旋转 + token_ver 即刻失效）----
   auth: {
     // JWT 签名密钥：生产必须显式配置；缺省时仅给开发期兜底值（启动时会打警告）
     jwtSecret: env('JWT_SECRET', 'dev-insecure-secret'),
+    // access token 有效期：短效无状态（role/dept 进 JWT，改权限靠 token_ver 失效旧 token）
+    accessTtl: env('JWT_ACCESS_TTL', '15m'),
+    // refresh token 有效期（天）：旋转复用，落库 sha256 哈希（users 表单活 token 模型）
+    refreshDays: Number(env('JWT_REFRESH_DAYS', '30')),
     // 预置用户清单：'用户名:密码[:角色[:部门]]'，如 'demo:demo123,alice:alice123:member:研发,boss:boss123:admin'
     // 角色 member|admin（admin 可见全部文档并管理用户）；部门为字符串编码（如 研发/销售），留空则 dept 级文档对其不可见
     users: String(env('AUTH_USERS', ''))

@@ -72,6 +72,10 @@ CREATE INDEX IF NOT EXISTS idx_grants_user ON doc_grants(user_id);
 
 -- M12 多实例：抢占时间戳（宕机后由 stale 回收判定"卡死"的 processing）
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS processing_since TIMESTAMPTZ;
+-- M14 无状态鉴权：token_ver 进 JWT（改角色 +1 即刻失效旧 token）；refresh 单活哈希（旋转复用）
+ALTER TABLE users ADD COLUMN IF NOT EXISTS token_ver INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS refresh_hash TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS refresh_exp TIMESTAMPTZ;
 `
 
 // 启动即初始化 schema；挂 no-op catch 防早期 unhandledRejection，真实错误由首个查询处抛出
@@ -95,6 +99,26 @@ export async function upsertUser(id, username, passHash, role, dept) {
      ON CONFLICT(username) DO UPDATE SET role = excluded.role, dept = excluded.dept`,
     [id, username, passHash, role, dept]
   )
+}
+
+// ---- M14 无状态鉴权：token_ver 自增（旧 access token 的 ver 立即对不上 → 401）----
+export async function bumpUserTokenVer(id) {
+  const { rows } = await q('UPDATE users SET token_ver = token_ver + 1 WHERE id = $1 RETURNING token_ver', [id])
+  return rows[0]?.token_ver ?? 0
+}
+
+// refresh 单活模型：同一用户仅一个有效 refresh token（登录/刷新时覆盖，登出/失效时置空）
+export async function setRefreshToken(id, hash, exp) {
+  await q('UPDATE users SET refresh_hash = $2, refresh_exp = $3 WHERE id = $1', [id, hash, exp])
+}
+
+// refresh 旋转查找：sha256(refreshToken) → 用户行（无行 = token 无效或已被旋转覆盖）
+export async function getUserByRefreshHash(hash) {
+  const { rows } = await q(
+    'SELECT id, username, role, dept, token_ver, refresh_hash, refresh_exp FROM users WHERE refresh_hash = $1',
+    [hash]
+  )
+  return rows[0] ?? null
 }
 export async function getUserByName(username) {
   return (await q('SELECT * FROM users WHERE username = $1', [username])).rows[0]

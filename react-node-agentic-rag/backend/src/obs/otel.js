@@ -95,12 +95,13 @@ export function otelSpan(name, kind, attrs = {}) {
  * 返回控制器额外携带 _ctx，配合 runInCtx 让后续子 span 自动挂到本 span 之下
  */
 export function rootSpan(name, attrs = {}) {
-  if (!enabled) return noop
+  if (!enabled) return { _ctx: null, traceId: null, setAttr: () => { }, end: () => { } }
   const span = trace.getTracer('agentic-rag').startSpan(name)
   span.setAttributes({ 'openinference.span.kind': 'CHAIN', 'langfuse.trace.name': name, ...attrs })
   const _ctx = trace.setSpan(context.active(), span) // 捕获根上下文
   return {
     _ctx,
+    traceId: span.spanContext().traceId, // 透出给调用方（done 事件 → 评估脚本 score 回填的关联键）
     setAttr: (k, v) => span.setAttribute(k, v),
     end: (output) => {
       if (output !== undefined) {

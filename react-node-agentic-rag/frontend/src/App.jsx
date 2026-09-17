@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import ChatTab from './components/ChatTab.jsx'
 import DocsTab from './components/DocsTab.jsx'
 import Login from './components/Login.jsx'
-import { getToken, setToken, setOnUnauthorized } from './api.js'
+import { getToken, setOnUnauthorized, logout as apiLogout } from './api.js'
 
 export default function App() {
   // 登录态：localStorage有 token 即视为已登录（token 过期由 api 层 401 统一兜底）
@@ -26,7 +26,7 @@ export default function App() {
   }
 
   function logout() {
-    setToken(null)
+    apiLogout() // M14：吊销服务端 refresh + 清本地 access/refresh
     localStorage.removeItem('agr_user')
     setUser(null)
   }

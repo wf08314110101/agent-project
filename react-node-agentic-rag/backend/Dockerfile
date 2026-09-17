@@ -1,11 +1,7 @@
 FROM node:24-slim
 WORKDIR /app
 
-# better-sqlite3 无预编译包时回退 node-gyp，需 python3/make/g++
-RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ \
-  && rm -rf /var/lib/apt/lists/*
-
-# 依赖层缓存：先 lockfile 再源码
+# 依赖层缓存：先 lockfile 再源码（better-sqlite3 已移入 devDependencies，生产镜像无需 node-gyp 工具链）
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 

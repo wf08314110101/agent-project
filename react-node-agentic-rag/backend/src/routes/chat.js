@@ -77,6 +77,9 @@ export default async function (app) {
       const send = sse(reply)
       const abort = new AbortController()
       let clientGone = false
+      // 登记在途流：服务优雅退出时被统一 abort（server.js），走静默收尾不卡 app.close()
+      app.sseStreams.add(abort)
+      abort.signal.addEventListener('abort', () => { clientGone = true }, { once: true })
       // 请求体读完后 req.raw 也会 close；以「响应未写完就 close」判定真断开
       // 真断开 → abort 上游 LLM 请求，不再浪费 token
       reply.raw.on('close', () => {
@@ -210,7 +213,8 @@ export default async function (app) {
           send('done', { stopReason: 'error', sessionId: session.id, traceId: root.traceId })
         }
       } finally {
-        // 无论成败：结束根 span → 关闭 SSE 流 → 冲刷观测数据
+        // 无论成败：结束根 span → 注销在途流 → 关闭 SSE 流 → 冲刷观测数据
+        app.sseStreams.delete(abort)
         root.end()
         reply.raw.end()
         await flushObs()

@@ -40,6 +40,8 @@ const app = Fastify({
   logger: { level: 'info' },          // 内置 pino 日志，info 级别
   bodyLimit: 32 * 1024 * 1024,        // JSON 请求体上限 32MB（文件走 multipart，另有独立限制）
 })
+// 在途 SSE 流登记表：优雅退出时统一 abort，避免 app.close() 被长连接卡死（chat.js 注册/注销）
+app.decorate('sseStreams', new Set())
 
 // ---- 插件注册（await 确保顺序：cors/multipart/rate-limit 先于路由生效）----
 await app.register(cors, { origin: config.corsOrigin })
@@ -119,11 +121,21 @@ try {
   app.log.warn(`[qdrant] 启动检查失败: ${e.message}`)
 }
 
-// ---- 优雅退出：先停 worker（不再取新任务）→ 关闭 HTTP（等待在途请求）→ 退出 ----
+// ---- 优雅退出：停 worker → abort 在途 SSE（终止上游 LLM，放行长连接）→ 关 HTTP → 收尾退出 ----
+let closing = false
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, async () => {
-    await ingest.stop()
-    await app.close()
+    if (closing) process.exit(1)       // 二次信号：放弃等待，立即强退
+    closing = true
+    const force = setTimeout(() => process.exit(1), 10_000) // 兜底：优雅关闭 10s 未完成则强退
+    try {
+      await ingest.stop()              // 不再领取新摄取任务
+      for (const a of app.sseStreams) a.abort()
+      await app.close()                // 等待在途请求收尾
+      clearTimeout(force)
+    } catch (e) {
+      app.log.error(`[shutdown] ${e.message}`)
+    }
     if (redis) redis.disconnect()
     await closeBus() // 冲刷/关闭 Redis pub-sub 连接
     await flushObs() // 冲刷观测队列，防止尾部 span 丢失

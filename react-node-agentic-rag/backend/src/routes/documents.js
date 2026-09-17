@@ -16,6 +16,7 @@ import {
   deleteGrantsByDoc, listGrantsByDoc, grantDoc, revokeGrant, getUserByName, getUserById,
 } from '../store/pg.js'
 import { deleteDocPoints, setDocAclPayload } from '../rag/qdrant.js'
+import { bumpKbEpoch } from '../rag/answer-cache.js'
 import { CLASSIFICATIONS, sanitizeTags } from '../acl.js'
 import { config } from '../config.js'
 
@@ -143,6 +144,8 @@ export default async function (app) {
     }
 
     const updated = await getDoc(doc.id)
+    // 可见性变化（密级/授权）→ KB 纪元 +1：回答缓存全量失效（ID6）
+    if (classification !== undefined || grants !== undefined) await bumpKbEpoch()
     const grants2 = await listGrantsByDoc(doc.id)
     const names = (await Promise.all(grants2.map((g) => getUserById(g.user_id)))).map((u) => u?.username).filter(Boolean)
     return reply.send({ ...updated, grants: names })

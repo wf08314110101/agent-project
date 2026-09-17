@@ -11,6 +11,7 @@
 
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createHash } from 'node:crypto'
 import { AutoTokenizer, AutoModelForSequenceClassification, env } from '@huggingface/transformers'
 import { config } from '../config.js'
 
@@ -33,6 +34,12 @@ async function getReranker() {
   return reranker
 }
 
+// ---- rerank 分数缓存（ID7）：键 = sha1(查询 + 有序块文本哈希)，内容寻址天然免疫脏读 ----
+// 命中等价重放 rerankScore（省 CPU cross-encoder 推理）；重启即空，纯优化层
+const scoreCache = new Map()
+const SCORE_CACHE_MAX = 300
+const textHash = (t) => createHash('sha1').update(t).digest('hex')
+
 /**
  * 重排：对 (query, hit) 逐对打 relevance 分（raw logit），降序取前 topK
  * @param {string}  query   - 查询原文
@@ -40,10 +47,15 @@ async function getReranker() {
  * @param {object}  opts
  *   - topK:  返回条数（默认全部，保持原顺序语义由调用方截断）
  *   - textOf: 块文本提取（默认 h.text；可拼接标题等上下文）
- * @returns {Promise<Array>} 重排后命中（附 rerankScore = 原始 logit）
+ * @returns {Promise<Array>} 重排后命中（附 rerankScore = 原始 logit）；返回克隆，调用方可安全改写
  */
 export async function rerank(query, hits, { topK = hits.length, textOf = (h) => h.text } = {}) {
   if (!hits.length) return []
+  const cacheKey = createHash('sha1')
+    .update(query.trim().toLowerCase() + '\n' + hits.map((h) => textHash(textOf(h))).join(','))
+    .digest('hex')
+  const hit = scoreCache.get(cacheKey)
+  if (hit) return hit.slice(0, topK).map((h) => ({ ...h })) // 克隆防调用方改写污染缓存
   const { tok, model } = await getReranker()
   const texts = hits.map(textOf)
   const scored = []
@@ -61,5 +73,8 @@ export async function rerank(query, hits, { topK = hits.length, textOf = (h) => 
       scored.push({ ...hits[i + j], rerankScore: logits.data[j] })
     }
   }
-  return scored.sort((a, b) => b.rerankScore - a.rerankScore).slice(0, topK)
+  const sorted = scored.sort((a, b) => b.rerankScore - a.rerankScore)
+  scoreCache.set(cacheKey, sorted)
+  if (scoreCache.size > SCORE_CACHE_MAX) scoreCache.delete(scoreCache.keys().next().value) // FIFO
+  return sorted.slice(0, topK).map((h) => ({ ...h }))
 }

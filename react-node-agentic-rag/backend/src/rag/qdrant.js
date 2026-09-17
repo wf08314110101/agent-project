@@ -14,6 +14,7 @@ import { randomUUID } from 'node:crypto'
 import { QdrantClient } from '@qdrant/js-client-rest'
 import { config } from '../config.js'
 import { toSparse } from './tokenizer.js'
+import { bumpKbEpoch } from './answer-cache.js'
 
 // 共享客户端实例：15s 超时防止 Qdrant 卡死拖垮请求
 export const qdrant = new QdrantClient({ url: config.qdrantUrl, timeout: 15_000 })
@@ -32,8 +33,17 @@ export async function ensureCollection() {
     await qdrant.createCollection(config.qdrantCollection, {
       vectors: { dense: { size: config.embed.dim, distance: 'Cosine' } },
       sparse_vectors: { sparse: { modifier: 'idf' } },
+      // ID7 存储调优：int8 标量量化（always_ram 常驻内存，省 ~75% 向量内存）+ HNSW 参数；
+      // 仅建集合时生效——存量集合需删除重建（文档重新摄取）才应用
+      ...(config.qdrant.quantile > 0 && {
+        quantization_config: {
+          scalar: { type: 'int8', quantile: config.qdrant.quantile, always_ram: true },
+        },
+      }),
+      hnsw_config: { m: config.qdrant.hnswM, ef_construct: config.qdrant.hnswEfConstruct },
     })
-    console.log(`[qdrant] 已创建混合检索集合 ${config.qdrantCollection}（dense + sparse/idf）`)
+    console.log(`[qdrant] 已创建混合检索集合 ${config.qdrantCollection}（dense + sparse/idf` +
+      `${config.qdrant.quantile > 0 ? ' + int8量化' : ''}，HNSW m=${config.qdrant.hnswM}/efc=${config.qdrant.hnswEfConstruct}）`)
     return
   } catch (e) {
     if (!isAlreadyExists(e)) throw e
@@ -88,6 +98,7 @@ export async function indexChunks({ docId, filename, chunks, vectors, acl = {} }
   // 1.13+ 客户端：upsert 需用 { points: [...] } 包装；wait:true 确保写入可见再继续
   await qdrant.upsert(config.qdrantCollection, { points }, { wait: true })
   invalidateCount() // 点数变化：空库降级预判的计数缓存立即失效
+  await bumpKbEpoch() // 资料变化（ID6）：回答缓存全量失效
   return points.length
 }
 
@@ -131,9 +142,11 @@ export async function hybridSearch({ text, vector, limit = 5, docId, acl, fusion
     },
   }
   const sparseVec = toSparse(text)
+  // ID7：查询侧 HNSW ef（0 = 不传走服务端默认）；挂在稠密路 prefetch 上
+  const efParams = config.qdrant.hnswEf > 0 ? { params: { hnsw_ef: config.qdrant.hnswEf } } : {}
   const fetch2 = [
     // 稠密路：语义相似；阈值粗滤在服务端做（余弦分量纲，仅此路有效）
-    { query: vector, using: 'dense', limit: k, threshold: config.retrieveMinScore },
+    { query: vector, using: 'dense', limit: k, threshold: config.retrieveMinScore, ...efParams },
     // 稀疏路：字面/BM25 匹配，无需阈值（BM25 分数量纲与余弦无关）
     { query: sparseVec, using: 'sparse', limit: k },
   ]
@@ -169,6 +182,7 @@ export async function hybridSearch({ text, vector, limit = 5, docId, acl, fusion
       using: 'dense', // 集合为命名向量，必须显式指定（缺省默认空名会 400）
       limit,
       with_payload: true,
+      ...efParams,
       ...scope,
     })
     return {
@@ -188,6 +202,7 @@ export async function deleteDocPoints(docId) {
     wait: true,
   })
   invalidateCount() // 点数变化：空库降级预判的计数缓存立即失效
+  await bumpKbEpoch() // 资料变化（ID6）：回答缓存全量失效
 }
 
 /**

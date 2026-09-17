@@ -23,6 +23,7 @@ import { ensureCollection } from './rag/qdrant.js'
 import { createIngestWorker } from './rag/ingest.js'
 import { closeBus } from './rag/bus.js'
 import { seedUsers, initAuthCache, currentTokenVer } from './auth.js'
+import { initAnswerCache } from './rag/answer-cache.js'
 import healthRoutes from './routes/health.js'
 import authRoutes from './routes/auth.js'
 import documentRoutes from './routes/documents.js'
@@ -61,6 +62,7 @@ if (config.redis.url) {
 }
 await app.register(rateLimit, rateLimitOpts)
 initAuthCache(redis) // M14：token_ver 校验的多实例共享缓存（未配 Redis 退回进程内存）
+initAnswerCache(redis) // ID6：回答缓存共享态（多实例同 Key TTL 一致；未配 Redis 退回进程内存）
 
 // ---- JWT 鉴权 ----
 if (process.env.JWT_SECRET) {

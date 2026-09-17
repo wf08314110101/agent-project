@@ -18,6 +18,7 @@ import { rootSpan, runInCtx, flushObs } from '../obs/otel.js'
 import { insertSession, getSession, insertMsg, getMemory, listAfterSeq, getDoc } from '../store/pg.js'
 import { countPoints } from '../rag/qdrant.js'
 import { canReadDoc, aclFor } from '../acl.js'
+import { answerCacheKey, getAnswer, setAnswer, kbEpoch } from '../rag/answer-cache.js'
 import { config } from '../config.js'
 
 /**
@@ -97,6 +98,41 @@ export default async function (app) {
       })
       const steps = []      // 过程事件存档（落库回放用）
       let sources = []      // 最终引用来源
+
+      // ---- 回答缓存探测（ID6）：失败静默降级为未命中；acl 算好后供 runAgent 复用 ----
+      let acl = null
+      let cacheKey = null
+      let cached = null
+      if (config.answerCache.ttlSec > 0) {
+        try {
+          acl = await aclFor(req.user) // M10 RBAC：缓存键指纹 + 召回过滤共用
+          cacheKey = answerCacheKey({ question, topK, docId, acl, epoch: await kbEpoch() })
+          cached = await getAnswer(cacheKey)
+        } catch { } // pg/Redis 抖动 → 按未命中走主链路
+      }
+
+      if (cached) {
+        // 命中：先落库再回放（客户端断开也不丢会话记录），stopReason=cache 与实答区分
+        root.setAttr('langfuse.trace.metadata', JSON.stringify({ cacheHit: true }))
+        try {
+          await insertMsg(session.id, 'user', question, null)
+          await insertMsg(session.id, 'assistant', cached.answer,
+            JSON.stringify({ sources: cached.sources, steps: [], usage: cached.usage, stopReason: 'cache' }))
+          if (!reply.raw.writableEnded) {
+            send('step', { phase: 'observation', label: '缓存', content: '命中同类问答缓存，直接回放' })
+            send('sources', { sources: cached.sources })
+            for (let i = 0; i < cached.answer.length; i += 24) send('delta', { text: cached.answer.slice(i, i + 24) })
+            send('usage', { elapsedSec: 0, rounds: 0, ...cached.usage })
+            send('done', { stopReason: 'cache', sessionId: session.id, traceId: root.traceId })
+          }
+        } finally {
+          root.end()
+          reply.raw.end()
+          await flushObs()
+        }
+        return
+      }
+
       // emit 双通道：一边实时 SSE 推给前端，一边收集起来随消息落库
       const emit = (event, data) => {
         if (event === 'step') steps.push(data)
@@ -151,7 +187,7 @@ export default async function (app) {
 
       try {
         // 运行 Agent 主图（ReAct 循环）—— 在根 span 上下文内执行，子 span 自动挂树
-        const acl = await aclFor(req.user) // M10 RBAC：密级/归属/授权的服务端召回前过滤
+        acl ??= await aclFor(req.user) // M10 RBAC：缓存探测未算过时这里补算（密级/归属/授权召回前过滤）
         const result = await runInCtx(root, () =>
           runAgent({
             messages: input,
@@ -194,6 +230,8 @@ export default async function (app) {
           answer,
           JSON.stringify({ sources, steps, usage, stopReason: result.stopReason ?? 'normal' })
         )
+        // 回填回答缓存（ID6）：成功实答才入缓存；abort/error 走 catch 不污染
+        if (cacheKey) await setAnswer(cacheKey, { answer, sources, usage, rounds: result.stepCount })
 
         // 收尾事件：先 usage 后 done，前端按 done 收尾 UI；traceId 供评估脚本 score 回填关联
         send('usage', { elapsedSec: elapsed, rounds: result.stepCount, ...usage })

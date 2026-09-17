@@ -168,10 +168,35 @@ async function rewriteNode(state, cfg) {
   return { queries: finalQueries, attempts: state.attempts + 1 }
 }
 
+// ---- 首跳改写（ID7，QUERY_REWRITE=on 启用）：检索前把原始问题改写成更利于召回的查询 ----
+// （同义扩展/关键词化/换个问法），复用 REWRITE_SCHEMA 强制形状；不计入 attempts（不消耗重试额度）；
+// LLM 失败静默回退原问题，只多花一次尝试、不阻断检索
+async function preRewriteNode(state, cfg) {
+  const c = cfg?.configurable ?? {}
+  const span = otelSpan('search_kb.pre_rewrite', 'LLM', { 'input.value': state.question })
+  let queries = []
+  try {
+    const { args, usage } = await chatStructured(
+      rewriteMessages(state.question, [], '首轮检索前的查询优化'),
+      REWRITE_SCHEMA,
+      { name: 'submit_rewrite', description: '提交首轮检索查询', signal: c.signal }
+    )
+    queries = args.queries
+    span.end(args, { usage })
+  } catch (e) {
+    span.end(`首跳改写失败: ${e.message}`, { level: 'ERROR', statusMessage: e.message })
+  }
+  const next = (queries ?? []).map(String).filter(Boolean).slice(0, 2)
+  const finalQueries = next.length ? next : [state.question]
+  c.emit?.('step', { phase: 'thought', label: '查询优化', content: finalQueries.join(' | ') })
+  return { queries: finalQueries } // attempts 不变
+}
+
 // 网络兜底：重试额度用尽仍不足 → 联网搜索一次，结果并入资料后再过一遍 grade 过滤
 const hostOf = (u) => {
   try { return new URL(u).hostname } catch { return '' }
 }
+
 async function webSearchNode(state, cfg) {
   const c = cfg?.configurable ?? {}
   c.emit?.('step', {
@@ -211,13 +236,15 @@ const shouldRetry = (state) => {
   return END
 }
 
-// ---- 编译子图：retrieve → grade →（条件）rewrite / web_search → grade → END ----
+// ---- 编译子图：START →（可选首跳改写）→ retrieve → grade →（条件）rewrite / web_search → grade → END ----
 export const searchGraph = new StateGraph(SearchState)
   .addNode('retrieve', retrieveNode)
   .addNode('grade', gradeNode)
   .addNode('rewrite', rewriteNode)
   .addNode('web_search', webSearchNode)
-  .addEdge(START, 'retrieve')
+  .addNode('pre_rewrite', preRewriteNode)
+  .addConditionalEdges(START, () => (config.agent.queryRewrite ? 'pre_rewrite' : 'retrieve')) // ID7 开关
+  .addEdge('pre_rewrite', 'retrieve')
   .addEdge('retrieve', 'grade')
   .addConditionalEdges('grade', shouldRetry)
   .addEdge('rewrite', 'retrieve')

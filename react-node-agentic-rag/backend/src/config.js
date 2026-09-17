@@ -50,12 +50,17 @@ export const config = {
     model: env('LLM_MODEL', 'deepseek-chat'),                    // 对话模型名
   },
 
-  // ---- 嵌入模型（本地 CPU 推理，不依赖外部 embedding API）----
+  // ---- 嵌入模型：local = 本地 CPU transformers.js；openai = OpenAI 兼容 /embeddings 端点（硅基流动等）----
+  // 切换 provider 时 EMBED_DIM 必须与新模型输出维度一致（Qdrant 集合维度建后不可改，需重建集合）
   embed: {
-    model: env('EMBED_MODEL', 'Xenova/bge-small-zh-v1.5'), // 中文小模型，输出 512 维向量
+    provider: env('EMBED_PROVIDER', 'local'),               // local | openai
+    model: env('EMBED_MODEL', 'Xenova/bge-small-zh-v1.5'), // 本地模型（provider=local）
     dim: int('EMBED_DIM', 512),                            // 向量维度，必须与 Qdrant 集合定义一致
     device: env('EMBED_DEVICE', 'cpu'),                    // 推理设备（transformers.js 支持 cpu/webgpu 等）
     endpoint: env('HF_ENDPOINT', 'https://hf-mirror.com'), // 模型下载镜像（国内访问 HuggingFace 加速）
+    apiModel: env('EMBED_API_MODEL', ''),                  // provider=openai 必填（如 BAAI/bge-m3）
+    apiBaseUrl: env('EMBED_API_BASE_URL', ''),             // 空 = 复用 LLM_BASE_URL
+    apiKey: env('EMBED_API_KEY', ''),                      // 空 = 复用 LLM_API_KEY
   },
 
   // ---- 检索阈值：相似度低于该分数的结果直接丢弃（粗过滤噪声）----
@@ -70,10 +75,22 @@ export const config = {
     dtype: env('RERANK_DTYPE', 'q8'),                       // 量化精度：q8 体积小速度快，fp32 更准
   },
 
+  // ---- Qdrant 存储调优（ID7）：建集合时生效，存量集合需删除重建才应用 ----
+  qdrant: {
+    quantile: Number(env('QDRANT_QUANTILE', '0.99')), // int8 标量量化分位（0.99 保留极端值）；0 = 关闭量化
+    hnswM: int('QDRANT_HNSW_M', 16),                  // HNSW 每节点最大边数（越大召回越准、内存越高）
+    hnswEfConstruct: int('QDRANT_HNSW_EF_CONSTRUCT', 128), // 建索引候选队列长度（越大索引质量越高、建库越慢）
+    hnswEf: int('QDRANT_HNSW_EF', 0),                 // 查询侧 ef；0 = 不传（服务端默认）
+  },
+
+  // ---- 回答缓存（ID6）：键 = 问题+ACL指纹+KB纪元；命中直接 SSE 回放完整答案 ----
+  answerCache: { ttlSec: int('ANSWER_CACHE_TTL_SEC', 1800) }, // 0 = 关闭
+
   // ---- Agent 行为控制 ----
   agent: {
     maxIterations: int('AGENT_MAX_ITERATIONS', 6),   // 主图最大轮数（防死循环；超过则强制直答）
     searchMaxAttempts: int('SEARCH_MAX_ATTEMPTS', 2), // search_kb 子图最大"改写→重检"尝试次数
+    queryRewrite: env('QUERY_REWRITE', 'false') === 'true', // ID7：首跳检索前 LLM 改写/关键词化（增 ~1s 延迟）
   },
 
   // ---- 网络搜索兜底（CRAG：库内重试额度用尽仍不足时联网补救）----

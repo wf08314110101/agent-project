@@ -7,7 +7,7 @@ This is a repository containing multiple AI Agent-related sub-projects, covering
 | Sub-project | Description | Tech Stack | Core Functions |
 |--------|------|--------|----------|
 | [LLM-SSE](LLM-SSE/README.md) | Complete solution for LLM streaming output | Node.js | Multi-vendor API compatibility, SSE protocol encapsulation, Browser/CLI examples |
-| [react-node-agentic-rag](react-node-agentic-rag/README.md) | React + Node.js Agentic RAG | React + Node.js + LangGraph | Graph-based Agent, Retrieval routing, Memory mechanism, Document processing pipeline |
+| [react-node-agentic-rag](react-node-agentic-rag/README.md) | React + Node.js Agentic RAG | React + Node.js + LangGraph | Graph-based Agent (ReAct loop), Hybrid retrieval (dense+sparse RRF), RBAC classification, MCP Server, Full-chain observability |
 | [react-python-rag](react-python-rag/README.md) | Python RAG backend implementation | FastAPI + Python | PDF/Word OCR, Vector search, Streaming generation |
 | [react-react-agent](react-react-agent/README.md) | React ReAct Agent (True Streaming Version) | React + Vite | ReAct inference loop, True streaming output, Tool extension |
 
@@ -31,9 +31,10 @@ Suitable for scenarios requiring building complex Agent systems, including retri
 ```bash
 # One-click start for frontend and backend (Development mode)
 cd react-node-agentic-rag
+cp backend/.env.example backend/.env   # fill in LLM_API_KEY
 ./start.sh
 
-# Visit http://localhost:5173 to experience conversation and document retrieval
+# Visit http://localhost:5174 (default account demo/demo123); upload documents first, then ask questions
 ```
 
 ### 3. react-python-rag (Python RAG Backend)
@@ -63,7 +64,7 @@ npm run dev
 ## Technical Features Overview
 
 - **LLM-SSE**: Supports multi-vendor APIs (OpenAI, Anthropic, Azure, etc.), deep SSE protocol compatibility, error handling and retry mechanisms
-- **react-node-agentic-rag**: LangGraph-based Agent graph structure, Qdrant vector storage, SQLite session management, OpenTelemetry observability
+- **react-node-agentic-rag**: LangGraph-based Agent graph, Qdrant hybrid retrieval (server-side RRF), Postgres + Redis (multi-instance shared state), RBAC with citation traceability, MCP Server (stdio/HTTP), OpenTelemetry observability
 - **react-python-rag**: PDF/Word document OCR parsing, Chroma/Weaviate vector databases, FastAPI async backend
 - **react-react-agent**: Langfuse observation integration, Dynamic tool system, Streaming token character-by-character output
 

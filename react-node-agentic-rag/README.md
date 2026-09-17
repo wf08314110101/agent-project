@@ -11,7 +11,7 @@ React 5174 ──SSE── Fastify 8788 ──┬── DeepSeek (LLM, 工具调
   ChatTab: 步骤时间线/来源卡片      │
   DocsTab: 上传+状态轮询            ├── LangGraph 主图: agent ⇄ tools (ReAct loop)
                                    │      └─ search_kb 子图: retrieve → grade → rewrite
-                                   ├── Qdrant 6333 (向量) ←─ 本地嵌入 bge-small-zh (ONNX)
+                                   ├── Qdrant 6333 (向量) ←─ 嵌入: 本地 bge ONNX ｜ 远程 /embeddings (EMBED_PROVIDER)
                                    ├── Postgres 5432 (文档/会话/消息) ｜ Redis 6379 (可选，多实例共享态)
                                    └── MCP Server (M13) ←─ Cursor / Claude Code / Trae 等客户端直连检索
 观测: OTel 单管道双导出 → Langfuse 云端 ｜ Phoenix (PHOENIX_ENABLED=true)
@@ -21,7 +21,8 @@ React 5174 ──SSE── Fastify 8788 ──┬── DeepSeek (LLM, 工具调
 
 - **摄取队列**：上传即 202 入队，worker 后台解析→切块→嵌入（分批上报进度%），SSE 实时推送状态（断线自动回退轮询）；同内容 hash 去重；宕机自恢复
 - **混合检索**：稠密（bge 语义）+ 稀疏（jieba 分词 BM25）双路 Qdrant 服务端 RRF 融合，关键词/专名查询不丢召回
-- **Agentic 检索**：多查询并发检索 + LLM 逐条相关性评估（结果缓存）+ 材料不足自动改写重检（CRAG，有界 2 次）
+- **Agentic 检索**：多查询并发检索 + LLM 逐条相关性评估（结果缓存）+ 材料不足自动改写重检（CRAG，有界 2 次）；可选首跳查询改写（`QUERY_REWRITE=on`，检索前先优化查询，不计入重试额度）
+- **回答缓存（M15）**：同问题 + 同可见资料（KB 纪元）+ 同 ACL 指纹命中直接 SSE 回放（`stopReason=cache`，先落库再回放），省检索/评估/LLM 全链路；文档增删、密级授权变更纪元 +1 全量失效，杜绝脏读；Redis 共享多实例，`ANSWER_CACHE_TTL_SEC=0` 关闭
 - **工具调用**：search_knowledge / calculator / get_current_time；参数 schema 校验门、同参重复调用检测、同批多工具并行执行；超 6 轮强制直答防死循环
 - **引用锚点**：检索块全局唯一编号，回答行内 [n] 可点击跳转对应来源卡片；指定文档问答（DocsTab「提问」→ 仅在该文档范围检索）
 - **会话**：多轮上下文（超窗滚动摘要压缩，seq 断点零丢失）、消息+步骤+来源持久化回放、会话增删
@@ -30,7 +31,7 @@ React 5174 ──SSE── Fastify 8788 ──┬── DeepSeek (LLM, 工具调
 - **无状态鉴权（M14）**：access JWT 短效（payload 携带 role/dept/ver，authenticate 零查库）+ token_ver 即刻失效（改权限 bump，旧 token 立即 401，ver 走 Redis/内存两级缓存）+ refresh token 单活旋转（sha256 落库，前端 401 自续期重放）
 - **可观测**：单一 OTel 管道双导出——Langfuse trace/span/usage + Phoenix OpenInference，一次埋点两平台同构
 - **MCP 服务化（M13）**：知识库暴露为 MCP Server，Cursor/Claude Code/Trae/Inspector 等客户端直连检索；4 个只读工具 + 全文 Resource，双传输 stdio（独立进程）/ Streamable HTTP（Bearer）；ACL 与 Web 端同源（canReadDoc/aclFor，密级召回前过滤）
-- **生产防线**：限流（全局 120/min、chat 20/min、login 10/min）、知识库为空降级直答、坏用例回归脚本、容器化部署（compose 健康检查依赖）、CI（回归 + 镜像构建）
+- **生产防线**：限流（全局 120/min、chat 20/min、login 10/min）、知识库为空降级直答、坏用例回归脚本、容器化部署（compose 健康检查依赖）、CI（回归 + 镜像构建）、优雅退出（在途 SSE 登记 abort + 10s 兜底强退 + 二次信号即退）
 
 ## 快速开始
 
@@ -54,10 +55,14 @@ docker compose up -d backend frontend
 | `LLM_MODEL` | deepseek-chat | 兼容 OpenAI 协议的模型名 |
 | `LLM_BASE_URL` | api.deepseek.com/v1 | 任何 OpenAI 兼容端点 |
 | `QDRANT_URL` / `QDRANT_COLLECTION` | localhost:6333 / agentic_docs | 向量库 |
-| `EMBED_MODEL` / `EMBED_DIM` | Xenova/bge-small-zh-v1.5 / 512 | 本地嵌入 |
+| `EMBED_MODEL` / `EMBED_DIM` | Xenova/bge-small-zh-v1.5 / 512 | 本地嵌入（provider=local）；`EMBED_DIM` 必须与集合维度一致 |
+| `EMBED_PROVIDER` / `EMBED_API_MODEL` | local / - | 嵌入 provider：`local`（本地 ONNX）/ `openai`（OpenAI 兼容 `/embeddings` 端点）；openai 必填 `EMBED_API_MODEL`，`EMBED_API_BASE_URL`/`EMBED_API_KEY` 缺省复用 LLM 配置；切换需同步 `EMBED_DIM` 并删除重建集合 |
 | `HF_ENDPOINT` | hf-mirror.com | 模型下载镜像（国内） |
 | `RETRIEVE_MIN_SCORE` | 0.3 | 稠密路相似度阈值（RRF 融合分不再二次过滤） |
 | `AGENT_MAX_ITERATIONS` / `SEARCH_MAX_ATTEMPTS` | 6 / 2 | 主图轮数上限 / 检索重试上限 |
+| `QUERY_REWRITE` | false | 首跳检索前 LLM 改写查询（多花 ~1s，召回更稳；不计入重试额度） |
+| `ANSWER_CACHE_TTL_SEC` | 1800 | 回答缓存 TTL 秒（0 = 关闭），命中直接 SSE 回放（stopReason=cache） |
+| `QDRANT_QUANTILE` / `QDRANT_HNSW_M` / `QDRANT_HNSW_EF_CONSTRUCT` / `QDRANT_HNSW_EF` | 0.99 / 16 / 128 / 0 | 建集合调优：int8 量化分位（0=关）/ HNSW m / ef_construct / 查询侧 ef（0=默认）；仅新建集合生效 |
 | `WEB_SEARCH_PROVIDER` | bing | 网络兜底搜索源：bing（免 key）/ tavily（需 key）/ off（关闭） |
 | `RETRIEVE_FUSION` / `RETRIEVE_PREFETCH_MUL` | rrf / 0 | 服务端融合算法（rrf / dbsf）/ 召回池倍率（M8 rerank 实验开关） |
 | `TAVILY_API_KEY` / `WEB_SEARCH_MAX_RESULTS` / `WEB_SEARCH_TIMEOUT_MS` | - / 4 / 8000 | tavily key / 兜底抓取条数 / 单次搜索超时 |
@@ -89,9 +94,9 @@ docker compose up -d backend frontend
 
 除 `/api/auth/login` 与 `/api/health` 外，所有接口需 `Authorization: Bearer <token>`。
 
-**M10 RBAC**：密级三级 `public`（全体登录用户）/ `dept`（同归属人部门）/ `private`（仅 owner + 显式授权），受控标签枚举（技术方案/制度/会议纪要/运维/竞品/测试）。密级下沉为 Qdrant payload 在**召回前服务端过滤**（ownerId/classification/ownerDept），检索后隐藏等于没保护；`canReadDoc`（backend/src/acl.js）是唯一可读性判定单点，不可读一律 404 不泄露存在性；JWT 只放 sub，role/dept 每请求查库（改角色即刻生效）。PATCH 密级同步 `setPayload`，改完即生效无需重摄；启动时对无密级旧点位回填 public（保持升级前可见性）。新上传默认 private。
+**M10 RBAC**：密级三级 `public`（全体登录用户）/ `dept`（同归属人部门）/ `private`（仅 owner + 显式授权），受控标签枚举（技术方案/制度/会议纪要/运维/竞品/测试）。密级下沉为 Qdrant payload 在**召回前服务端过滤**（ownerId/classification/ownerDept），检索后隐藏等于没保护；`canReadDoc`（backend/src/acl.js）是唯一可读性判定单点，不可读一律 404 不泄露存在性；role/dept 签发进 JWT payload（M14 无状态校验），改权限 bump token_ver 即刻失效旧 token。PATCH 密级同步 `setPayload`，改完即生效无需重摄；启动时对无密级旧点位回填 public（保持升级前可见性）。新上传默认 private。
 
-`POST /api/chat` 事件流：`step`(action/observation，时间线) → `sources`(来源卡片，带全局引用编号) → `delta`(正文 token) ｜ `reasoning`(思维链 token，独立通道) → `usage`(轮次/token/耗时) → `done`(stopReason: normal/max_iter/abort/error) ｜ `error`。
+`POST /api/chat` 事件流：`step`(action/observation，时间线) → `sources`(来源卡片，带全局引用编号) → `delta`(正文 token) ｜ `reasoning`(思维链 token，独立通道) → `usage`(轮次/token/耗时) → `done`(stopReason: normal/max_iter/abort/error/cache) ｜ `error`。`stopReason=cache` 表示命中回答缓存直接回放（usage 为原答用量，rounds=0）。
 
 ## MCP 接入（M13）
 
@@ -152,7 +157,7 @@ M9 cross-encoder 实验结论（[reranker.js](backend/src/rag/reranker.js) + `re
 
 1. `@qdrant/js-client-rest@1.19`：`upsert` 需 `{points:[...]}` 包装；`search()` 已删除改 `query()`（返回 `{points}`）
 2. otel v2 移除 `Resource` 类，用 `resourceFromAttributes()`
-3. node:24-slim 中 better-sqlite3 回退 node-gyp：Dockerfile 需 `python3 make g++`
+3. node:24-slim 中 better-sqlite3 回退 node-gyp——M15 起移出生产依赖（保留 devDependencies 供迁移脚本），Dockerfile 不再装 `python3 make g++`
 4. nginx 反代 SSE 必须 `proxy_buffering off`，否则流式变一次性输出
 5. SSE 误判断开：POST 体读完 `req.raw` 也会 close，需 `writableEnded` 守卫
 6. `@node-rs/jieba` 必须显式 `Jieba.withDict` 加载词典，否则中文全切成单字，BM25 稀疏向量失效
@@ -163,7 +168,7 @@ M9 cross-encoder 实验结论（[reranker.js](backend/src/rag/reranker.js) + `re
 
 ```
 backend/src/  server·config·auth·acl ｜ routes/(auth·chat·documents·sessions·debug·admin·health)
-              rag/(parser·chunker·embedder·tokenizer·qdrant·ingest·retriever·reranker·websearch)
+              rag/(parser·chunker·embedder·tokenizer·qdrant·ingest·retriever·reranker·websearch·answer-cache)
               agent/(graph·search-graph·tools·prompts·memory) ｜ store/pg ｜ mcp/(mcp-server·stdio·http) ｜ obs/otel
 frontend/src/ App ｜ components/(Login·ChatTab·DocsTab) ｜ api(token + SSE 解析)
 scripts/      regression.mjs（回归）· evaluate.mjs（评估）· backend/scripts/mcp-smoke.mjs（MCP 冒烟）· migrate-sqlite-to-pg.mjs（M11 迁移）

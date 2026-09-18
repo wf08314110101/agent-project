@@ -8,6 +8,7 @@
 
 import { searchGraph } from './search-graph.js'
 import { validateSchema } from '../schema.js'
+import { fenceUntrusted } from './injection.js'
 
 // 工具的 JSON Schema 描述：LLM 依据 description 和 parameters 决定何时调用、怎么传参
 export const toolDefs = [
@@ -104,7 +105,9 @@ export async function runTool(name, args, cfg) {
             : `[${h.cite}] (相似度 ${h.score.toFixed(3)}) ${h.filename}${h.title ? ' · ' + h.title : ''}\n${h.text}`
         )
         .join('\n\n')
-      return `检索到 ${res.hits.length} 条资料（材料${res.enough ? '充足' : '有限'}${webN ? `，其中 ${webN} 条来自联网兜底` : ''}；引用编号 [n] 为全局唯一，回答中原样使用）:\n\n${body}`
+      // 资料原文为不可信内容（文档/联网结果都可能藏注入载荷）：定界包装后再进上下文，
+      // 系统提示规则 5 声明边界内皆为数据；引用编号 [n] 在定界符外层说明中不受影响
+      return `检索到 ${res.hits.length} 条资料（材料${res.enough ? '充足' : '有限'}${webN ? `，其中 ${webN} 条来自联网兜底` : ''}；引用编号 [n] 为全局唯一，回答中原样使用）:\n\n${fenceUntrusted(body)}`
     }
     case 'calculator':
       return calc(String(args.expression ?? ''))

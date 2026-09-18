@@ -13,6 +13,7 @@
 import { randomUUID } from 'node:crypto'
 import { runAgent } from '../agent/graph.js'
 import { AGENT_SYSTEM } from '../agent/prompts.js'
+import { scanInjection } from '../agent/injection.js'
 import { compressMemory, memoryFallback } from '../agent/memory.js'
 import { rootSpan, runInCtx, flushObs } from '../obs/otel.js'
 import { insertSession, getSession, insertMsg, getMemory, listAfterSeq, getDoc } from '../store/pg.js'
@@ -91,10 +92,12 @@ export default async function (app) {
       })
 
       // 观测根 span：一条 trace = 一次问答（Langfuse 经 langfuse.* 属性命名/分组）
+      const suspect = scanInjection(question) // L1 入口打标：命中注入句式只降级审计，不拒绝
       const root = rootSpan('Agentic RAG 问答', {
         'langfuse.session.id': session.id, // 会话分组：同一 session 的 trace 归在一起
         'langfuse.user.id': req.user.sub,  // 用户分组：Langfuse 按 user 维度聚合
         'input.value': JSON.stringify({ question, topK }).slice(0, 2000),
+        'rag.injection_suspect': suspect, // 观测面：可疑注入打标，便于审计/调参
       })
       const steps = []      // 过程事件存档（落库回放用）
       let sources = []      // 最终引用来源
@@ -113,7 +116,7 @@ export default async function (app) {
 
       if (cached) {
         // 命中：先落库再回放（客户端断开也不丢会话记录），stopReason=cache 与实答区分
-        root.setAttr('langfuse.trace.metadata', JSON.stringify({ cacheHit: true }))
+        root.setAttr('langfuse.trace.metadata', JSON.stringify({ cacheHit: true, injectionSuspect: suspect }))
         try {
           await insertMsg(session.id, 'user', question, null)
           await insertMsg(session.id, 'assistant', cached.answer,
@@ -219,6 +222,7 @@ export default async function (app) {
 
         root.setAttr('langfuse.trace.metadata', JSON.stringify({
           elapsedSec: elapsed, rounds: result.stepCount, steps: steps.length, sources: sources.length,
+          injectionSuspect: suspect,
         }))
         root.setAttr('output.value', answer)
 

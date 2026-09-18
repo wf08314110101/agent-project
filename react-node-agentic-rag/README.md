@@ -29,6 +29,7 @@ React 5174 ──SSE── Fastify 8788 ──┬── DeepSeek (LLM, 工具调
 - **思维链通道**：reasoning token 走独立 SSE 事件（deepseek-reasoner 等模型自动生效），前端折叠面板展示，不与正文混流
 - **鉴权**：预置用户 + JWT 登录（scrypt 存储密码），会话/文档按用户隔离；登录接口单独限流
 - **无状态鉴权（M14）**：access JWT 短效（payload 携带 role/dept/ver，authenticate 零查库）+ token_ver 即刻失效（改权限 bump，旧 token 立即 401，ver 走 Redis/内存两级缓存）+ refresh token 单活旋转（sha256 落库，前端 401 自续期重放）
+- **Prompt 防注入（M16）**：检索资料/联网兜底包进随机 nonce 定界符（防伪造闭合）+ 系统提示声明「定界内皆数据」；输出侧检测系统提示泄露（命中即拒答 + span 告警）；入口注入句式打标进 trace（`rag.injection_suspect`）供审计，不拒绝（防误杀）
 - **可观测**：单一 OTel 管道双导出——Langfuse trace/span/usage + Phoenix OpenInference，一次埋点两平台同构
 - **MCP 服务化（M13）**：知识库暴露为 MCP Server，Cursor/Claude Code/Trae/Inspector 等客户端直连检索；4 个只读工具 + 全文 Resource，双传输 stdio（独立进程）/ Streamable HTTP（Bearer）；ACL 与 Web 端同源（canReadDoc/aclFor，密级召回前过滤）
 - **生产防线**：限流（全局 120/min、chat 20/min、login 10/min）、知识库为空降级直答、坏用例回归脚本、容器化部署（compose 健康检查依赖）、CI（回归 + 镜像构建）、优雅退出（在途 SSE 登记 abort + 10s 兜底强退 + 二次信号即退）
@@ -169,7 +170,7 @@ M9 cross-encoder 实验结论（[reranker.js](backend/src/rag/reranker.js) + `re
 ```
 backend/src/  server·config·auth·acl ｜ routes/(auth·chat·documents·sessions·debug·admin·health)
               rag/(parser·chunker·embedder·tokenizer·qdrant·ingest·retriever·reranker·websearch·answer-cache)
-              agent/(graph·search-graph·tools·prompts·memory) ｜ store/pg ｜ mcp/(mcp-server·stdio·http) ｜ obs/otel
+              agent/(graph·search-graph·tools·prompts·memory·injection) ｜ store/pg ｜ mcp/(mcp-server·stdio·http) ｜ obs/otel
 frontend/src/ App ｜ components/(Login·ChatTab·DocsTab) ｜ api(token + SSE 解析)
 scripts/      regression.mjs（回归）· evaluate.mjs（评估）· backend/scripts/mcp-smoke.mjs（MCP 冒烟）· migrate-sqlite-to-pg.mjs（M11 迁移）
 evals/        golden.jsonl（34 题标注）· fixtures/（8 文档）· results/（基线存档）

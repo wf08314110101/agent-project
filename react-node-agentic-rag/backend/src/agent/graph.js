@@ -13,7 +13,8 @@ import { StateGraph, Annotation, START, END } from '@langchain/langgraph'
 import { chatStream } from '../llm.js'
 import { config } from '../config.js'
 import { toolDefs, runTool, validateToolArgs } from './tools.js'
-import { FORCE_ANSWER } from './prompts.js'
+import { FORCE_ANSWER, AGENT_SYSTEM } from './prompts.js'
+import { leaksSystemPrompt } from './injection.js'
 import { otelSpan } from '../obs/otel.js'
 
 // 状态定义：Annotation 描述每个字段的合并策略（reducer）
@@ -51,9 +52,16 @@ async function agentNode(state, cfg) {
     onReason: (text) => c.emit?.('reasoning', { text }),
   })
 
+  // 输出侧防注入：回答套取/复述系统提示 → 替换为拒答（span 记 WARNING，不影响 tool_calls 流程）
+  let leakBlocked = false
+  if (message.content && leaksSystemPrompt(message.content, AGENT_SYSTEM)) {
+    message.content = '抱歉，我无法回答该问题。'
+    leakBlocked = true
+  }
+
   // 累计每轮 usage，路由层最后统一汇总；span 记录输出与 token 用量
   c.usageAcc?.push(usage)
-  span.end(message.content, { usage })
+  span.end(message.content, leakBlocked ? { level: 'WARNING', statusMessage: '回答疑似泄露系统提示，已替换为拒答' } : { usage })
 
   // 返回新状态：追加 assistant 消息 + 更新轮数；force 时标记 stopReason
   return { messages: [message], stepCount, stopReason: force ? 'max_iter' : state.stopReason }

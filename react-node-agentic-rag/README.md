@@ -24,7 +24,8 @@ React 5174 ──SSE── Fastify 8788 ──┬── DeepSeek (LLM, 工具调
 - **Agentic 检索**：多查询并发检索 + LLM 逐条相关性评估（结果缓存）+ 材料不足自动改写重检（CRAG，有界 2 次）；可选首跳查询改写（`QUERY_REWRITE=on`，检索前先优化查询，不计入重试额度）
 - **回答缓存（M15）**：同问题 + 同可见资料（KB 纪元）+ 同 ACL 指纹命中直接 SSE 回放（`stopReason=cache`，先落库再回放），省检索/评估/LLM 全链路；文档增删、密级授权变更纪元 +1 全量失效，杜绝脏读；Redis 共享多实例，`ANSWER_CACHE_TTL_SEC=0` 关闭
 - **工具调用**：search_knowledge / calculator / get_current_time；参数 schema 校验门、同参重复调用检测、同批多工具并行执行；超 6 轮强制直答防死循环
-- **引用锚点**：检索块全局唯一编号，回答行内 [n] 可点击跳转对应来源卡片；指定文档问答（DocsTab「提问」→ 仅在该文档范围检索）
+- **引用锚点**：检索块全局唯一编号，回答行内 [n] 可点击跳转对应来源卡片；指定文档问答（DocsTab「提问」→ 仅在该文档范围、按其所属集合定向检索）
+- **文档预览（M17）**：摄取原件保留（不再处理完即删），`GET /api/documents/:id/content` 原样回传（canReadDoc 鉴权，pdf 浏览器原生渲染，文本类 text/plain，html 不 inline 防 XSS），前端点文件名新标签页预览
 - **会话**：多轮上下文（超窗滚动摘要压缩，seq 断点零丢失）、消息+步骤+来源持久化回放、会话增删
 - **思维链通道**：reasoning token 走独立 SSE 事件（deepseek-reasoner 等模型自动生效），前端折叠面板展示，不与正文混流
 - **鉴权**：预置用户 + JWT 登录（scrypt 存储密码），会话/文档按用户隔离；登录接口单独限流
@@ -32,7 +33,7 @@ React 5174 ──SSE── Fastify 8788 ──┬── DeepSeek (LLM, 工具调
 - **Prompt 防注入（M16）**：检索资料/联网兜底包进随机 nonce 定界符（防伪造闭合）+ 系统提示声明「定界内皆数据」；输出侧检测系统提示泄露（命中即拒答 + span 告警）；入口注入句式打标进 trace（`rag.injection_suspect`）供审计，不拒绝（防误杀）
 - **可观测**：单一 OTel 管道双导出——Langfuse trace/span/usage + Phoenix OpenInference，一次埋点两平台同构
 - **MCP 服务化（M13）**：知识库暴露为 MCP Server，Cursor/Claude Code/Trae/Inspector 等客户端直连检索；4 个只读工具 + 全文 Resource，双传输 stdio（独立进程）/ Streamable HTTP（Bearer）；ACL 与 Web 端同源（canReadDoc/aclFor，密级召回前过滤）
-- **领域包（M17）**：通用层冻结，业务知识可插拔——`backend/src/domain/` 一包一目录自包含五件套（语料结构/切分策略/提示片段/工具集/评测集），经 registry 单点拼装（工具表/标签词表/切分器/提示片段四注入点），内核零领域知识；`DOMAIN_PACKS` 单激活，留空 = 纯 core 行为零破坏；一领域一 Qdrant 集合（payload 机制 schema 全局统一），KB 纪元按集合分桶缓存互不清；首个包 `api-docs`：GitHub md 连接器（hash 判重 + 版本化替换 + 废弃标注）+ 领域工具 fetch_api_doc + 900 字文档切分
+- **领域包（M17）**：通用层冻结，业务知识可插拔——`backend/src/domain/` 一包一目录自包含五件套（语料结构/切分策略/提示片段/工具集/评测集），经 registry 单点拼装（工具表/标签词表/切分器/提示片段四注入点），内核零领域知识；`DOMAIN_PACKS` 单激活，留空 = 纯 core 行为零破坏；一领域一 Qdrant 集合（payload 机制 schema 全局统一），KB 纪元按集合分桶缓存互不清；`GET /api/meta` 动态下发当前标签词表（前端编辑器/筛选器随包适配）；首个包 `api-docs`：GitHub md 连接器（hash 判重 + 版本化替换 + 废弃标注）+ 领域工具 fetch_api_doc + 900 字文档切分
 - **生产防线**：限流（全局 120/min、chat 20/min、login 10/min）、知识库为空降级直答、坏用例回归脚本、容器化部署（compose 健康检查依赖）、CI（回归 + 镜像构建）、优雅退出（在途 SSE 登记 abort + 10s 兜底强退 + 二次信号即退）
 
 ## 快速开始
@@ -89,12 +90,14 @@ docker compose up -d backend frontend
 | POST | `/api/auth/login` | 登录 → `{token}`（唯一开放的写入口，限流 10/min） |
 | POST | `/api/documents` | multipart 上传（可带 `classification`/`tags`/`collection`——collection 仅接受已启用领域包集合，M17），202 入队（`duplicated: true` 表示重复） |
 | GET | `/api/documents` | 可见集合：本人 ∪ public ∪ 同部门(dept) ∪ 被授权；admin 全量 |
+| GET | `/api/documents/:id/content` | 原文预览：原样回传字节（pdf→application/pdf，其余→text/plain）；不可读/原件缺失 404 |
 | GET | `/api/documents/events` | 摄取进度 SSE（`docs` 快照 + `doc` 单文档进度%），按可见性推送 |
 | PATCH | `/api/documents/:id` | 密级/标签/授权（`grants`: 用户名数组）；owner 或 admin；ready 文档同步刷 Qdrant payload 即时生效 |
 | DELETE | `/api/documents/:id` | 先删向量再删元数据；摄取中返回 409；不可读文档 404 |
 | POST | `/api/chat` | `{question, topK, sessionId?, docId?}` → SSE；docId 走 canReadDoc 单点判定（不可读 404） |
 | GET | `/api/sessions` · `/:id/messages` · DELETE | 会话管理（按用户隔离，他人会话 404） |
-| GET | `/api/debug/retrieval?q=&topK=` | 裸检索观测（评估数据源/调参用），受 ACL 约束 |
+| GET | `/api/debug/retrieval?q=&topK=` | 裸检索观测（评估数据源/调参用），受 ACL 约束；带 docId 按文档所属集合定向 |
+| GET | `/api/meta` | 公开元信息：当前生效标签词表（随领域包注入变化） |
 | GET | `/api/admin/users` · PATCH `/:id` | 用户列表 / 调整角色部门（admin only） |
 | GET | `/api/health` | 健康检查（开放，供容器探活） |
 
@@ -149,7 +152,7 @@ npm run domain:sync                      # 手动同步 Vue 中文文档 → rag
 # 上传/评测注入领域语料：multipart 带 collection=rag_api_docs（白名单校验）
 ```
 
-启用后：主检索集合切到 `rag_api_docs`（问答/裸检索/MCP 同源切换）、领域工具 `fetch_api_doc` 进工具表、领域提示片段（废弃接口不作为依据）追加系统提示、标签词表覆盖为包定义。删除包 = 停用 env + drop collection，数据零残留。新领域包照 `api-docs` 五件套复制（index/tools/chunker/prompts/connector/evals）+ registry 注册一行。
+启用后：主检索集合切到 `rag_api_docs`（问答/裸检索/MCP 同源切换；文档级 QA 按文档所属集合定向检索）、领域工具 `fetch_api_doc` 进工具表、领域提示片段（废弃接口不作为依据）追加系统提示、标签词表覆盖为包定义（前端经 `/api/meta` 动态获取，文档列表显示集合列 + 废弃标注）。删除包 = 停用 env + drop collection，数据零残留。新领域包照 `api-docs` 五件套复制（index/tools/chunker/prompts/connector/evals）+ registry 注册一行。
 
 ## 回归与评估
 

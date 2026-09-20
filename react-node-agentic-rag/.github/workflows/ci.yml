@@ -67,7 +67,7 @@ jobs:
       - name: 跑回归
         run: node scripts/regression.mjs
       - name: 检索质量阈值门禁（零 LLM，秒级）
-        run: node scripts/evaluate.mjs --layer retrieval --assert "recall>=0.85,mrr>=0.7,purity=1"
+        run: node scripts/evaluate.mjs --suite core --layer retrieval --assert "recall>=0.85,mrr>=0.7,purity=1"
 
   build:
     name: 镜像构建

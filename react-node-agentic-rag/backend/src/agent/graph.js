@@ -13,7 +13,7 @@ import { StateGraph, Annotation, START, END } from '@langchain/langgraph'
 import { chatStream } from '../llm.js'
 import { config } from '../config.js'
 import { toolDefs, runTool, validateToolArgs } from './tools.js'
-import { FORCE_ANSWER, AGENT_SYSTEM } from './prompts.js'
+import { FORCE_ANSWER, buildAgentSystem } from './prompts.js'
 import { leaksSystemPrompt } from './injection.js'
 import { otelSpan } from '../obs/otel.js'
 
@@ -54,7 +54,7 @@ async function agentNode(state, cfg) {
 
   // 输出侧防注入：回答套取/复述系统提示 → 替换为拒答（span 记 WARNING，不影响 tool_calls 流程）
   let leakBlocked = false
-  if (message.content && leaksSystemPrompt(message.content, AGENT_SYSTEM)) {
+  if (message.content && leaksSystemPrompt(message.content, buildAgentSystem())) {
     message.content = '抱歉，我无法回答该问题。'
     leakBlocked = true
   }

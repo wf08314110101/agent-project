@@ -32,6 +32,7 @@ React 5174 ──SSE── Fastify 8788 ──┬── DeepSeek (LLM, 工具调
 - **Prompt 防注入（M16）**：检索资料/联网兜底包进随机 nonce 定界符（防伪造闭合）+ 系统提示声明「定界内皆数据」；输出侧检测系统提示泄露（命中即拒答 + span 告警）；入口注入句式打标进 trace（`rag.injection_suspect`）供审计，不拒绝（防误杀）
 - **可观测**：单一 OTel 管道双导出——Langfuse trace/span/usage + Phoenix OpenInference，一次埋点两平台同构
 - **MCP 服务化（M13）**：知识库暴露为 MCP Server，Cursor/Claude Code/Trae/Inspector 等客户端直连检索；4 个只读工具 + 全文 Resource，双传输 stdio（独立进程）/ Streamable HTTP（Bearer）；ACL 与 Web 端同源（canReadDoc/aclFor，密级召回前过滤）
+- **领域包（M17）**：通用层冻结，业务知识可插拔——`backend/src/domain/` 一包一目录自包含五件套（语料结构/切分策略/提示片段/工具集/评测集），经 registry 单点拼装（工具表/标签词表/切分器/提示片段四注入点），内核零领域知识；`DOMAIN_PACKS` 单激活，留空 = 纯 core 行为零破坏；一领域一 Qdrant 集合（payload 机制 schema 全局统一），KB 纪元按集合分桶缓存互不清；首个包 `api-docs`：GitHub md 连接器（hash 判重 + 版本化替换 + 废弃标注）+ 领域工具 fetch_api_doc + 900 字文档切分
 - **生产防线**：限流（全局 120/min、chat 20/min、login 10/min）、知识库为空降级直答、坏用例回归脚本、容器化部署（compose 健康检查依赖）、CI（回归 + 镜像构建）、优雅退出（在途 SSE 登记 abort + 10s 兜底强退 + 二次信号即退）
 
 ## 快速开始
@@ -74,6 +75,10 @@ docker compose up -d backend frontend
 | `JWT_ACCESS_TTL` / `JWT_REFRESH_DAYS` | 15m / 30 | access 短效期（M14 无状态校验）/ refresh 有效期天数（单活旋转） |
 | `AUTH_USERS` | - | 预置用户 `用户名:密码[:角色[:部门]]`（M10），角色 member/admin；启动播种（不配则无人能登录） |
 | `MCP_ENABLED` / `MCP_ACCESS_USER` / `MCP_HTTP_TOKEN` | true / - / - | MCP Server（M13）：服务身份用户名（空 = 仅 public 匿名）/ 非空才挂 `POST /mcp`（Bearer）；stdio 入口不受这两项控制 |
+| `DOMAIN_PACKS` | 空 | 领域包单激活（M17，当前可选 `api-docs`）：主检索集合切 `rag_api_docs`、标签词表/切分策略/提示片段由包注入、上传接受 `collection=rag_api_docs`；留空 = 纯 core 零破坏 |
+| `DOMAIN_SYNC_INTERVAL_MIN` / `DOMAIN_SYNC_MAX_FILES` | 0 / 40 | 连接器定时同步间隔分钟（0 = 仅手动 `npm run domain:sync`）/ 单次最多摄取文件数 |
+| `DOMAIN_SYNC_REPO` / `DOMAIN_SYNC_BRANCH` / `DOMAIN_SYNC_DIR` / `DOMAIN_SYNC_DEPRECATED_DIR` | vuejs-translations/docs-zh-cn / main / src/ / 空 | 同步源 GitHub md 仓库 / 分支 / 子目录 / 废弃区子目录（deprecated 标注） |
+| `GITHUB_TOKEN` | - | GitHub API Token（可选，防匿名 60 次/h 限流） |
 | `LANGFUSE_*` | - | 配置即启用，不配为空壳 |
 | `PHOENIX_ENABLED` / `PHOENIX_ENDPOINT` | false | OTel → Phoenix |
 
@@ -82,7 +87,7 @@ docker compose up -d backend frontend
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/auth/login` | 登录 → `{token}`（唯一开放的写入口，限流 10/min） |
-| POST | `/api/documents` | multipart 上传（可带 `classification`/`tags`），202 入队（`duplicated: true` 表示重复） |
+| POST | `/api/documents` | multipart 上传（可带 `classification`/`tags`/`collection`——collection 仅接受已启用领域包集合，M17），202 入队（`duplicated: true` 表示重复） |
 | GET | `/api/documents` | 可见集合：本人 ∪ public ∪ 同部门(dept) ∪ 被授权；admin 全量 |
 | GET | `/api/documents/events` | 摄取进度 SSE（`docs` 快照 + `doc` 单文档进度%），按可见性推送 |
 | PATCH | `/api/documents/:id` | 密级/标签/授权（`grants`: 用户名数组）；owner 或 admin；ready 文档同步刷 Qdrant payload 即时生效 |
@@ -132,6 +137,20 @@ curl -X POST http://localhost:8788/mcp \
 
 冒烟验证：`node backend/scripts/mcp-smoke.mjs stdio`（或 `http`，需 8790 端口实例带 token；模拟 SDK Client 完整握手 + 4 工具 + resources）。
 
+## 领域模式（M17）
+
+```bash
+# core 模式（默认）：行为与纯内核完全一致，DOMAIN_PACKS 留空即可
+
+# 领域模式：启用 api-docs 包（API 文档助手）
+DOMAIN_PACKS=api-docs npm start          # backend/.env 配置同效
+npm run domain:sync                      # 手动同步 Vue 中文文档 → rag_api_docs（幂等）
+                                         # 或 DOMAIN_SYNC_INTERVAL_MIN=1440 启用每日定时
+# 上传/评测注入领域语料：multipart 带 collection=rag_api_docs（白名单校验）
+```
+
+启用后：主检索集合切到 `rag_api_docs`（问答/裸检索/MCP 同源切换）、领域工具 `fetch_api_doc` 进工具表、领域提示片段（废弃接口不作为依据）追加系统提示、标签词表覆盖为包定义。删除包 = 停用 env + drop collection，数据零残留。新领域包照 `api-docs` 五件套复制（index/tools/chunker/prompts/connector/evals）+ registry 注册一行。
+
 ## 回归与评估
 
 ```bash
@@ -140,15 +159,17 @@ node scripts/regression.mjs          # 需先起服务；自动以 demo/demo123 
 AUTH_USER=alice AUTH_PASS=xxx node scripts/regression.mjs    # 换账号
 BASE_URL=http://localhost:8080 node scripts/regression.mjs   # 打容器栈
 
-# 质量水位（M6）：evals/golden.jsonl 34 题 + 8 fixture 文档（自动上传，幂等）
-node scripts/evaluate.mjs --layer retrieval   # 检索层：recall@k / MRR / purity（零 LLM，秒级）
-node scripts/evaluate.mjs                     # 全量：+ 答案层 mustOk / faithfulness / relevance（LLM judge）
+# 质量水位（M6，M17 起双轨）：core 60 题 + domain 业务 12 题，各自独立基线与门禁
+node scripts/evaluate.mjs --layer retrieval            # 双轨检索层：recall@k / MRR / purity（零 LLM，秒级）
+node scripts/evaluate.mjs --suite core                 # 只跑 core 轨（冻结 60 题，内核回归门禁）
+node scripts/evaluate.mjs --suite domain               # 只跑 domain 轨（业务题，要求 DOMAIN_PACKS=api-docs 启动）
+node scripts/evaluate.mjs                              # 全量：双轨 + 答案层 mustOk / faithfulness / relevance
 node scripts/evaluate.mjs --baseline evals/results/<旧档>.json   # 与基线对比（调参前后 A/B）
-node scripts/evaluate.mjs --detail            # 逐题明细（期望缺失/干扰混入/忠实度问题逐条归因）
-node scripts/evaluate.mjs --layer retrieval --assert "recall>=0.85,mrr>=0.7,purity=1"  # 阈值门禁（CI 已挂）
+node scripts/evaluate.mjs --detail                     # 逐题明细（期望缺失/干扰混入/忠实度问题逐条归因）
+node scripts/evaluate.mjs --suite core --layer retrieval --assert "recall>=0.85,mrr>=0.7,purity=1"  # 阈值门禁（逐轨，CI 已挂）
 ```
 
-检索调参流程：改 `RETRIEVE_MIN_SCORE` / chunk 策略 / rerank 前跑一次存基线，改完 `--baseline` 对比数字。基线（34 题扩容集）：recall@5=1.0，MRR=0.985，purity=1，mustOkRate=1，faithfulness=0.994（竞争文档歧义题 mrr=0.5，是 rerank 实验的靶子）。注意：批量摄取后等 Qdrant 索引优化结束再评估，否则 HNSW 未收敛数字会抖。
+检索调参流程：改 `RETRIEVE_MIN_SCORE` / chunk 策略 / rerank 前跑一次存基线，改完 `--baseline` 对比数字。基线（core 轨 60 题）：recall@5=1.0，MRR=0.985，purity=1，mustOkRate=1，faithfulness=0.994（竞争文档歧义题 mrr=0.5，是 rerank 实验的靶子）。注意：批量摄取后等 Qdrant 索引优化结束再评估，否则 HNSW 未收敛数字会抖。
 
 M8 rerank 实验结论（`scripts/rerank-exp.mjs`，34 题 × 5 组合）：dbsf / 召回池×8 / dense 精排三种服务端策略 MRR 均在 0.971~0.985 打平（差异=1 题 rank，无显著性），**歧义题 rr=0.50 在所有策略下不变——「旧版检索基线」块语义字面双近，属语料级歧义，服务端排序无解**，后续方向是 cross-encoder 客户端 rerank 或语料治理。实验参数保留为 `RETRIEVE_FUSION` / `RETRIEVE_PREFETCH_MUL` 开关，默认维持 rrf。实验顺带修了两个潜伏 bug：dense-fallback 退化查询缺 `using:'dense'`（命名向量集合下必 400）；warn 现在带服务端 detail。
 
@@ -171,9 +192,10 @@ M9 cross-encoder 实验结论（[reranker.js](backend/src/rag/reranker.js) + `re
 backend/src/  server·config·auth·acl ｜ routes/(auth·chat·documents·sessions·debug·admin·health)
               rag/(parser·chunker·embedder·tokenizer·qdrant·ingest·retriever·reranker·websearch·answer-cache)
               agent/(graph·search-graph·tools·prompts·memory·injection) ｜ store/pg ｜ mcp/(mcp-server·stdio·http) ｜ obs/otel
+              domain/(registry + api-docs 五件套：index·tools·chunker·prompts·connector·evals)  # M17 领域包
 frontend/src/ App ｜ components/(Login·ChatTab·DocsTab) ｜ api(token + SSE 解析)
-scripts/      regression.mjs（回归）· evaluate.mjs（评估）· backend/scripts/mcp-smoke.mjs（MCP 冒烟）· migrate-sqlite-to-pg.mjs（M11 迁移）
-evals/        golden.jsonl（34 题标注）· fixtures/（8 文档）· results/（基线存档）
+scripts/      regression.mjs（回归）· evaluate.mjs（评估，--suite 双轨）· backend/scripts/(mcp-smoke.mjs·domain-sync.mjs) · migrate-sqlite-to-pg.mjs（M11 迁移）
+evals/        golden-core.jsonl（core 60 题标注）· fixtures/（8 文档）· results/（基线存档）；domain 轨随包：domain/api-docs/evals/
 .github/      workflows/ci.yml（回归 + 镜像构建）
 docs/         功能演进时间线.md
 ```

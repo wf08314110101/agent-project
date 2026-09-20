@@ -142,4 +142,11 @@ export const config = {
   // ---- Phoenix 观测（可选）：OpenTelemetry → Phoenix，默认关闭 ----
   phoenixEnabled: env('PHOENIX_ENABLED', 'false') === 'true',
   phoenixEndpoint: env('PHOENIX_ENDPOINT', 'http://localhost:6006/v1/traces'), // Phoenix 的 OTLP 接收端点
+
+  // ---- M17 领域包：单激活（DOMAIN_PACKS=api-docs），空 = 纯 core 行为（零破坏面）----
+  domain: {
+    packs: env('DOMAIN_PACKS', ''),                  // 启用的领域包名列表（逗号分隔）
+    syncIntervalMin: int('DOMAIN_SYNC_INTERVAL_MIN', 0), // 连接器定时同步间隔（分钟）；0 = 仅手动 npm run domain:sync
+    githubToken: env('GITHUB_TOKEN', ''),            // GitHub API Token（可选，防 60 次/h 限流）
+  },
 }

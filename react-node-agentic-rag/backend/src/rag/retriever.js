@@ -8,6 +8,7 @@
 
 import { embedOne } from './embedder.js'
 import { hybridSearch } from './qdrant.js'
+import { activeCollection } from '../domain/registry.js'
 
 /**
  * 检索：query 向量化 → Qdrant 混合检索（稠密语义 + 稀疏关键词 RRF 融合）
@@ -20,6 +21,6 @@ import { hybridSearch } from './qdrant.js'
  */
 export async function retrieve(question, topK = 5, docId, acl) {
   const vector = await embedOne(question)
-  const { hits } = await hybridSearch({ text: question, vector, limit: topK, docId, acl })
+  const { hits } = await hybridSearch({ text: question, vector, limit: topK, docId, acl, collection: activeCollection() })
   return hits
 }

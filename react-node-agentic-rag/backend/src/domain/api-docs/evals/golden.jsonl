@@ -1,0 +1,12 @@
+{"question": "云枢开放平台用户接口的分页 limit 默认是多少、最大是多少", "expect": ["默认 20", "100"], "answer_must": ["20", "100"], "note": "数字事实（同块多数字干扰）"}
+{"question": "用户接口的限流是每分钟多少次", "expect": ["60 次"], "answer_must": ["60"], "note": "数字（与订单/回调文档数字干扰）"}
+{"question": "批量查询用户一次最多传多少个 ID", "expect": ["50 个"], "answer_must": ["50"], "note": "数字事实"}
+{"question": "未支付订单多久自动关闭", "expect": ["30 分钟"], "answer_must": ["30 分钟"], "note": "数字（同文档 1-3 个工作日干扰）"}
+{"question": "创建订单接口如何保证幂等", "expect": ["Idempotency-Key", "24 小时"], "answer_must": ["Idempotency-Key"], "note": "机制题（英文专名/稀疏路强项）"}
+{"question": "Webhook 回调失败后的重试策略是什么", "expect": ["最多重试 3 次", "间隔 5 分钟"], "answer_must": ["3 次", "5 分钟"], "note": "多要点数字"}
+{"question": "回调签名用什么算法、时间戳偏差多少视为重放", "expect": ["HMAC-SHA256", "5 分钟"], "answer_must": ["HMAC-SHA256"], "note": "技术细节+数字"}
+{"question": "v1 Webhook 端点还能用吗", "expect": ["废弃", "2027 年 1 月 1 日"], "answer_must": ["废弃"], "note": "废弃标注治理：答案须注明已废弃"}
+{"question": "订单接口的限流是每分钟多少次", "expect_none": ["60 次"], "note": "负向：订单文档无限流描述，不得混入用户接口的 60 次作答依据"}
+{"question": "订单的状态机流转顺序是什么", "expect": ["created", "paid", "shipped", "completed", "cancelled"], "note": "枚举/流程"}
+{"question": "v2 相比 v1 的 Webhook 回调超时从多少秒放宽到多少秒", "expect": ["5 秒", "10 秒"], "answer_must": ["10 秒"], "note": "版本对比（跨 v1/v2 块拼接）"}
+{"question": "死信队列里的事件保留多少天", "expect": ["7 天"], "answer_must": ["7 天"], "note": "数字（回调文档末尾）"}

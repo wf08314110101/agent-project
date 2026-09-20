@@ -32,6 +32,7 @@ import { embedOne } from '../rag/embedder.js'
 import { canReadDoc, aclFor } from '../acl.js'
 import { otelSpan } from '../obs/otel.js'
 import { validateSchema } from '../schema.js'
+import { activeCollection } from '../domain/registry.js'
 
 // ---- 工具定义：JSON Schema（MCP 规范原生格式，同时喂给校验器做最后一道防线）----
 export const TOOL_DEFS = [
@@ -116,7 +117,7 @@ export async function handleToolCall(name, args = {}, { user, log = console } = 
       const q = String(args.query)
       const vector = await embedOne(q)
       const acl = await aclFor(u) // ACL 下沉 Qdrant：public ∪ 本人 ∪ 同部门 ∪ 显式授权
-      const { hits } = await hybridSearch({ text: q, vector, limit: k, docId: args.docId, acl })
+      const { hits } = await hybridSearch({ text: q, vector, limit: k, docId: args.docId, acl, collection: activeCollection() })
       if (!hits.length) return text(`知识库中没有找到与「${q}」相关的资料。`)
       const body = hits
         .map(
@@ -161,7 +162,7 @@ export async function handleToolCall(name, args = {}, { user, log = console } = 
     case 'rag_stats': {
       const rows = u.role === 'admin' ? await listDocsAll() : await listDocsVisible(u.sub, u.dept)
       const byStatus = rows.reduce((m, d) => ({ ...m, [d.status]: (m[d.status] ?? 0) + 1 }), {})
-      const points = await countPoints()
+      const points = await countPoints(activeCollection())
       return text(`文档 ${rows.length} 篇（${Object.entries(byStatus).map(([s, n]) => `${s}:${n}`).join(' ') || '空'}），向量点 ${points} 个。`)
     }
     default:
@@ -178,7 +179,7 @@ export async function handleResourceRead(uri, { user, log = console } = {}) {
   const u = user ?? (await serviceUser(log))
   const d = await getDoc(docId)
   if (!d || !(await canReadDoc(u, d))) throw new Error(`资源不存在或无权访问: ${uri}`)
-  const payloads = await scrollDocPoints(docId)
+  const payloads = await scrollDocPoints(docId, 2000, d.collection)
   const textAll = payloads.map((p) => p.text).join('\n\n')
   return {
     contents: [{ uri, mimeType: 'text/plain', text: `# ${d.filename}\n\n${textAll}` }],

@@ -24,14 +24,15 @@ export const qdrant = new QdrantClient({ url: config.qdrantUrl, timeout: 15_000 
 const prefetchLimit = (k, mul) => (mul ? k * mul : Math.max(k * 3, 12))
 
 /**
- * 幂等创建集合：稠密向量（config.embed.dim，Cosine）+ 稀疏向量（IDF modifier）。
+ * 幂等创建集合：稠密向量（dim 缺省 config.embed.dim，Cosine）+ 稀疏向量（IDF modifier）。
  * 旧集合只有默认无名稠密向量、无稀疏索引——检测到则删除重建（向量可由文档重新摄取恢复，
  * 属一次性迁移，日志明示）。
+ * M17：collection/dim 参数化——core 集合用 config 缺省值，领域集合由 registry 传入。
  */
-export async function ensureCollection() {
+export async function ensureCollection({ collection = config.qdrantCollection, dim = config.embed.dim } = {}) {
   try {
-    await qdrant.createCollection(config.qdrantCollection, {
-      vectors: { dense: { size: config.embed.dim, distance: 'Cosine' } },
+    await qdrant.createCollection(collection, {
+      vectors: { dense: { size: dim, distance: 'Cosine' } },
       sparse_vectors: { sparse: { modifier: 'idf' } },
       // ID7 存储调优：int8 标量量化（always_ram 常驻内存，省 ~75% 向量内存）+ HNSW 参数；
       // 仅建集合时生效——存量集合需删除重建（文档重新摄取）才应用
@@ -42,31 +43,31 @@ export async function ensureCollection() {
       }),
       hnsw_config: { m: config.qdrant.hnswM, ef_construct: config.qdrant.hnswEfConstruct },
     })
-    console.log(`[qdrant] 已创建混合检索集合 ${config.qdrantCollection}（dense + sparse/idf` +
+    console.log(`[qdrant] 已创建混合检索集合 ${collection}（dense + sparse/idf` +
       `${config.qdrant.quantile > 0 ? ' + int8量化' : ''}，HNSW m=${config.qdrant.hnswM}/efc=${config.qdrant.hnswEfConstruct}）`)
     return
   } catch (e) {
     if (!isAlreadyExists(e)) throw e
   }
   // 已存在：检查是否有稀疏索引，没有（M4 之前的旧集合）则重建
-  const info = await qdrant.getCollection(config.qdrantCollection)
+  const info = await qdrant.getCollection(collection)
   if (!info?.config?.params?.sparse_vectors) {
     console.warn(`[qdrant] 旧集合无稀疏索引，删除重建（已存文档需重新上传摄取）`)
-    await qdrant.deleteCollection(config.qdrantCollection)
-    await ensureCollection()
+    await qdrant.deleteCollection(collection)
+    await ensureCollection({ collection, dim })
     return
   }
   // M10 RBAC 存量回填：旧点位无 classification payload → 补 public
   // （升级前文档全局可读，保持原可见性；否则 ACL 过滤会把旧文档全部滤掉）
   try {
-    await qdrant.setPayload(config.qdrantCollection, {
+    await qdrant.setPayload(collection, {
       payload: { classification: 'public' },
       filter: { must: [{ is_empty: { key: 'classification' } }] },
     })
   } catch (e) {
     console.warn(`[qdrant] ACL payload 存量回填失败: ${e.message}`)
   }
-  console.log(`[qdrant] 集合 ${config.qdrantCollection} 已存在，跳过创建`)
+  console.log(`[qdrant] 集合 ${collection} 已存在，跳过创建`)
 }
 
 // 判断"集合已存在"错误：兼容 HTTP 409 状态码与错误消息两种形态
@@ -77,7 +78,7 @@ const isAlreadyExists = (e) => e?.status === 409 || /already exists/i.test(Strin
  * sparse 的输入与稠密嵌入一致（标题+正文拼接），保证两路看的是同一段内容。
  * acl：RBAC 随行元数据（ownerId/classification/ownerDept），写入每块 payload 供召回前过滤
  */
-export async function indexChunks({ docId, filename, chunks, vectors, acl = {} }) {
+export async function indexChunks({ docId, filename, chunks, vectors, acl = {}, collection = config.qdrantCollection, extraPayload = {} }) {
   const points = chunks.map((c, i) => {
     const text = c.title ? `${c.title}\n${c.text}` : c.text
     return {
@@ -92,13 +93,14 @@ export async function indexChunks({ docId, filename, chunks, vectors, acl = {} }
         ownerId: acl.ownerId ?? '',              // M10 RBAC：归属人
         classification: acl.classification ?? 'public', // 密级：public/dept/private
         ownerDept: acl.ownerDept ?? '',          // 归属人部门（dept 密级过滤键）
+        ...extraPayload, // M17 语料治理：领域扩展字段（source_url/doc_version/deprecated）
       },
     }
   })
   // 1.13+ 客户端：upsert 需用 { points: [...] } 包装；wait:true 确保写入可见再继续
-  await qdrant.upsert(config.qdrantCollection, { points }, { wait: true })
-  invalidateCount() // 点数变化：空库降级预判的计数缓存立即失效
-  await bumpKbEpoch() // 资料变化（ID6）：回答缓存全量失效
+  await qdrant.upsert(collection, { points }, { wait: true })
+  invalidateCount(collection) // 点数变化：空库降级预判的计数缓存立即失效
+  await bumpKbEpoch(collection) // 资料变化（ID6）：该集合的回答缓存全量失效（M17 按集合分桶）
   return points.length
 }
 
@@ -117,7 +119,7 @@ export async function indexChunks({ docId, filename, chunks, vectors, acl = {} }
  * @returns {Promise<{hits: Array, mode: string}>} 融合后 topK；
  *          mode = 'hybrid-rrf' | 'hybrid-dbsf' | 'hybrid-rrf+dense' | 'dense-fallback'
  */
-export async function hybridSearch({ text, vector, limit = 5, docId, acl, fusion = config.retrieveFusion, prefetchMul = 0, rerank = 'none' }) {
+export async function hybridSearch({ text, vector, limit = 5, docId, acl, collection = config.qdrantCollection, fusion = config.retrieveFusion, prefetchMul = 0, rerank = 'none' }) {
   const k = prefetchLimit(limit, prefetchMul)
   // M10 ACL：密级下沉为召回前服务端过滤（payload: classification/ownerId/ownerDept）
   // 可读条件（should 组，至少命中其一）：public ∪ 本人所有 ∪ 同部门 dept ∪ 显式授权 docId
@@ -169,7 +171,7 @@ export async function hybridSearch({ text, vector, limit = 5, docId, acl, fusion
         ...scope,
       }
   try {
-    const { points: hits } = await qdrant.query(config.qdrantCollection, params)
+    const { points: hits } = await qdrant.query(collection, params)
     return {
       mode: rerank === 'dense' ? 'hybrid-rrf+dense' : `hybrid-${fusion}`,
       hits: hits.map((h) => ({ score: h.score, ...h.payload })),
@@ -177,7 +179,7 @@ export async function hybridSearch({ text, vector, limit = 5, docId, acl, fusion
   } catch (e) {
     // 稀疏路不可用（旧集合/服务端不支持）：退化为纯稠密检索，保持可用性
     console.warn(`[qdrant] 混合检索失败，退化纯稠密: ${e?.data?.status?.error ?? e.message}`)
-    const { points: hits } = await qdrant.query(config.qdrantCollection, {
+    const { points: hits } = await qdrant.query(collection, {
       query: vector,
       using: 'dense', // 集合为命名向量，必须显式指定（缺省默认空名会 400）
       limit,
@@ -196,21 +198,21 @@ export async function hybridSearch({ text, vector, limit = 5, docId, acl, fusion
  * 按文档删除全部向量点：删除文档时调用（先删向量，再删元数据）
  * filter 过滤器等价于 SQL 的 WHERE docId = ?
  */
-export async function deleteDocPoints(docId) {
-  await qdrant.delete(config.qdrantCollection, {
+export async function deleteDocPoints(docId, collection = config.qdrantCollection) {
+  await qdrant.delete(collection, {
     filter: { must: [{ key: 'docId', match: { value: docId } }] },
     wait: true,
   })
-  invalidateCount() // 点数变化：空库降级预判的计数缓存立即失效
-  await bumpKbEpoch() // 资料变化（ID6）：回答缓存全量失效
+  invalidateCount(collection) // 点数变化：空库降级预判的计数缓存立即失效
+  await bumpKbEpoch(collection) // 资料变化（ID6）：该集合的回答缓存全量失效
 }
 
 /**
  * 同步文档级 ACL payload（M10）：PATCH 密级后把新值刷到该文档所有块的 payload，
  * 保证「改密级 → 检索立即生效」，无需重新摄取
  */
-export async function setDocAclPayload(docId, { ownerId, classification, ownerDept }) {
-  await qdrant.setPayload(config.qdrantCollection, {
+export async function setDocAclPayload(docId, { ownerId, classification, ownerDept }, collection = config.qdrantCollection) {
+  await qdrant.setPayload(collection, {
     payload: { ownerId: ownerId ?? '', classification: classification ?? 'public', ownerDept: ownerDept ?? '' },
     filter: { must: [{ key: 'docId', match: { value: docId } }] },
     wait: true,
@@ -223,14 +225,15 @@ export async function setDocAclPayload(docId, { ownerId, classification, ownerDe
  * 缓存是纯优化层：每次问答省一次 Qdrant 往返；写操作（入库/删向量）立即失效，
  * 保证"空库判断"在摄取完成后最多延迟 TTL 秒收敛。
  */
-let countCache = { v: null, at: 0 }
+let countCache = new Map() // collection → { v, at }（M17 多集合各一份计数缓存）
 const COUNT_TTL_MS = 30_000
-const invalidateCount = () => { countCache = { v: null, at: 0 } }
+const invalidateCount = (collection = config.qdrantCollection) => countCache.delete(collection)
 
-export async function countPoints() {
-  if (countCache.v !== null && Date.now() - countCache.at < COUNT_TTL_MS) return countCache.v
-  const { count } = await qdrant.count(config.qdrantCollection, { exact: true })
-  countCache = { v: count, at: Date.now() }
+export async function countPoints(collection = config.qdrantCollection) {
+  const c = countCache.get(collection)
+  if (c && Date.now() - c.at < COUNT_TTL_MS) return c.v
+  const { count } = await qdrant.count(collection, { exact: true })
+  countCache.set(collection, { v: count, at: Date.now() })
   return count
 }
 
@@ -238,12 +241,12 @@ export async function countPoints() {
  * 按 docId 滚动拉取全部向量点 payload（M13 MCP resource 全文读取用）：
  * 分页 scroll 直至取尽，按 chunkIndex 升序返回 payload（text 等）。
  */
-export async function scrollDocPoints(docId, hardLimit = 2000) {
+export async function scrollDocPoints(docId, hardLimit = 2000, collection = config.qdrantCollection) {
   const filter = { must: [{ key: 'docId', match: { value: docId } }] }
   const out = []
   let offset
   do {
-    const page = await qdrant.scroll(config.qdrantCollection, {
+    const page = await qdrant.scroll(collection, {
       filter,
       with_payload: true,
       limit: 100,

@@ -23,7 +23,7 @@ mock.module('../src/store/pg.js', {
   },
 })
 
-const { canReadDoc, aclFor, sanitizeTags, CLASSIFICATIONS, TAG_WHITELIST } = await import('../src/acl.js')
+const { canReadDoc, aclFor, sanitizeTags, CLASSIFICATIONS, getTagWhitelist, setTagWhitelist } = await import('../src/acl.js')
 
 const U = {
   admin: { sub: 'a1', role: 'admin', dept: '研发' },
@@ -137,9 +137,12 @@ describe('受控枚举', () => {
   it('CLASSIFICATIONS 三级', () => {
     assert.deepEqual(CLASSIFICATIONS, ['public', 'dept', 'private'])
   })
-  it('TAG_WHITELIST 覆盖预期标签', () => {
+  it('TAG_WHITELIST（core 缺省词表）覆盖预期标签，且可被领域包注入覆盖', () => {
     for (const t of ['技术方案', '制度', '会议纪要', '运维', '竞品', '测试']) {
-      assert.ok(TAG_WHITELIST.includes(t), `缺标签 ${t}`)
+      assert.ok(getTagWhitelist().includes(t), `缺标签 ${t}`)
     }
+    setTagWhitelist(['接口规范', 'SDK']) // M17 词表注入
+    assert.deepEqual(getTagWhitelist(), ['接口规范', 'SDK'])
+    assert.deepEqual(sanitizeTags('接口规范, 自由标签'), ['接口规范']) // 清洗按注入后词表
   })
 })

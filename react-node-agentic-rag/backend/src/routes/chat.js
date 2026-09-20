@@ -12,7 +12,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { runAgent } from '../agent/graph.js'
-import { AGENT_SYSTEM } from '../agent/prompts.js'
+import { buildAgentSystem } from '../agent/prompts.js'
 import { scanInjection } from '../agent/injection.js'
 import { compressMemory, memoryFallback } from '../agent/memory.js'
 import { rootSpan, runInCtx, flushObs } from '../obs/otel.js'
@@ -20,6 +20,7 @@ import { insertSession, getSession, insertMsg, getMemory, listAfterSeq, getDoc }
 import { countPoints } from '../rag/qdrant.js'
 import { canReadDoc, aclFor } from '../acl.js'
 import { answerCacheKey, getAnswer, setAnswer, kbEpoch } from '../rag/answer-cache.js'
+import { activeCollection } from '../domain/registry.js'
 import { config } from '../config.js'
 
 /**
@@ -70,7 +71,7 @@ export default async function (app) {
       let kbEmptyNote = null
       if (config.fallbackDirect) {
         try {
-          kbEmptyNote = (await countPoints()) === 0
+          kbEmptyNote = (await countPoints(activeCollection())) === 0
             ? '当前知识库为空：直接用你的通用知识回答用户问题，不要调用 search_knowledge，并在回答开头注明「（知识库暂无资料，以下为通用知识回答）」。'
             : null
         } catch { } // Qdrant 抖动时不阻塞对话
@@ -109,7 +110,7 @@ export default async function (app) {
       if (config.answerCache.ttlSec > 0) {
         try {
           acl = await aclFor(req.user) // M10 RBAC：缓存键指纹 + 召回过滤共用
-          cacheKey = answerCacheKey({ question, topK, docId, acl, epoch: await kbEpoch() })
+          cacheKey = answerCacheKey({ question, topK, docId, acl, epoch: await kbEpoch(activeCollection()) })
           cached = await getAnswer(cacheKey)
         } catch { } // pg/Redis 抖动 → 按未命中走主链路
       }
@@ -179,7 +180,7 @@ export default async function (app) {
 
       // 组装最终输入：系统提示 → （可选）空库提示 → （可选）会话记忆摘要 → 断点后历史 → 当前问题
       const input = [
-        { role: 'system', content: AGENT_SYSTEM },
+        { role: 'system', content: buildAgentSystem() },
         ...(kbEmptyNote ? [{ role: 'system', content: kbEmptyNote }] : []),
         ...(memoryNote
           ? [{ role: 'system', content: `（早期对话记忆摘要，供参考）\n${memoryNote}` }]

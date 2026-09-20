@@ -19,6 +19,10 @@ import { deleteDocPoints, setDocAclPayload } from '../rag/qdrant.js'
 import { bumpKbEpoch } from '../rag/answer-cache.js'
 import { CLASSIFICATIONS, sanitizeTags } from '../acl.js'
 import { config } from '../config.js'
+import { packs } from '../domain/registry.js'
+
+// M17 允许的目标集合：core（缺省）+ 已激活领域包集合（白名单校验，防任意集合注入）
+const ALLOWED_COLLECTIONS = () => new Set([config.qdrantCollection, ...packs.map((p) => p.collection)])
 
 export default async function (app) {
   // 独立的临时 worker 实例：仅用于上传后 wake() 队列（不重复跑循环）
@@ -37,6 +41,11 @@ export default async function (app) {
       const classification = String(file.fields?.classification?.value ?? 'private')
       if (!CLASSIFICATIONS.includes(classification)) return reply.code(400).send({ error: `密级必须是 ${CLASSIFICATIONS.join('/')}` })
       const tags = sanitizeTags(file.fields?.tags?.value)
+      // M17 目标集合（可选）：不传 = core；仅接受白名单内的领域集合
+      const collection = String(file.fields?.collection?.value ?? '').trim()
+      if (collection && !ALLOWED_COLLECTIONS().has(collection)) {
+        return reply.code(400).send({ error: `非法集合 ${collection}（未启用的领域包）` })
+      }
 
       const buf = await file.toBuffer() // 一次性读入内存（已有 fileSize 上限保护）
 
@@ -57,12 +66,13 @@ export default async function (app) {
       await fs.writeFile(filePath, buf)
 
       // 元数据入队：status=pending，挂当前用户归属，worker 会 wake 起来消费
-      await insertDoc(docId, file.filename, buf.length, hash, 0, 'pending', null, filePath, req.user.sub, classification, tags)
+      await insertDoc(docId, file.filename, buf.length, hash, 0, 'pending', null, filePath, req.user.sub, classification, tags,
+        collection ? { collection } : {})
       worker.wake()
 
       // 202 Accepted：任务已受理，尚未完成
       return reply.code(202).send({
-        doc: { id: docId, filename: file.filename, size: buf.length, status: 'pending', classification, tags },
+        doc: { id: docId, filename: file.filename, size: buf.length, status: 'pending', classification, tags, collection: collection || config.qdrantCollection },
       })
     } catch (e) {
       // 大小超限 → 413；其余 → 500
@@ -140,12 +150,12 @@ export default async function (app) {
         ownerId: doc.user_id,
         classification: nextCls,
         ownerDept: owner?.dept ?? '',
-      }).catch((e) => req.log.warn(`[acl] payload 同步失败: ${e.message}`))
+      }, doc.collection).catch((e) => req.log.warn(`[acl] payload 同步失败: ${e.message}`))
     }
 
     const updated = await getDoc(doc.id)
-    // 可见性变化（密级/授权）→ KB 纪元 +1：回答缓存全量失效（ID6）
-    if (classification !== undefined || grants !== undefined) await bumpKbEpoch()
+    // 可见性变化（密级/授权）→ 该集合 KB 纪元 +1：回答缓存全量失效（ID6/M17 按集合分桶）
+    if (classification !== undefined || grants !== undefined) await bumpKbEpoch(doc.collection)
     const grants2 = await listGrantsByDoc(doc.id)
     const names = (await Promise.all(grants2.map((g) => getUserById(g.user_id)))).map((u) => u?.username).filter(Boolean)
     return reply.send({ ...updated, grants: names })
@@ -163,7 +173,7 @@ export default async function (app) {
     if (doc.path) await fs.rm(doc.path, { force: true }).catch(() => {})
     if (doc.status === 'ready') {
       try {
-        await deleteDocPoints(doc.id) // 先删向量，再删元数据
+        await deleteDocPoints(doc.id, doc.collection) // 先删向量，再删元数据（M17 按文档所属集合删）
       } catch (e) {
         // 向量删除失败时保留元数据行：否则会留下"搜得到但看不到"的孤儿向量
         req.log.error(e)

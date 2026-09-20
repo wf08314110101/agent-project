@@ -3,7 +3,8 @@
 // 省掉检索/评估/LLM 全链路。纯优化层：任何故障静默降级为未命中。
 // ----------------------------------------------------------------------------
 // 键 = sha1(规范化问题 | topK | docId | ACL 指纹 | KB 纪元)
-// KB 纪元（rag:kb:epoch）：文档摄取 ready / 删除 / 密级授权变更时 +1，全部缓存天然失效，
+// KB 纪元（rag:kb:epoch:<collection>，M17 按集合分桶）：文档摄取 ready / 删除 / 密级授权
+// 变更时 +1，该集合全部缓存天然失效，core 与领域语料更新互不干扰；
 // 无需逐键清理，也避免"问题不变但资料变了仍回旧答案"的脏读。
 // 存储：REDIS_URL 配置时走 Redis（多实例共享 + 多进程一致），否则进程内 Map（单实例零配置）。
 // ============================================================================
@@ -15,29 +16,29 @@ let redis = null // 由 initAnswerCache 注入（server.js，与限流/auth 共�
 const mem = new Map() // 内存兜底存储 { v, exp }
 const MEM_MAX = 200
 
-let epochMem = 0 // 内存模式纪元
-const EPOCH_KEY = 'rag:kb:epoch'
+let epochMem = new Map() // collection → 纪元（内存模式，M17 按集合分桶）
 const ANS_PREFIX = 'rag:ans:'
+const epochKey = (collection) => `rag:kb:epoch:${collection || 'core'}`
 
 /** 注入共享 Redis 连接（server.js 启动时调用；不传 = 进程内存模式） */
 export const initAnswerCache = (r) => { redis = r }
 
 const ttlSec = () => config.answerCache.ttlSec
 
-/** 当前 KB 纪元（资料版本号） */
-export async function kbEpoch() {
+/** 当前 KB 纪元（资料版本号，按集合分桶——core 与领域语料更新互不清对方缓存） */
+export async function kbEpoch(collection = '') {
   if (redis) {
-    try { return Number((await redis.get(EPOCH_KEY)) ?? 0) || 0 } catch { return 0 }
+    try { return Number((await redis.get(epochKey(collection))) ?? 0) || 0 } catch { return 0 }
   }
-  return epochMem
+  return epochMem.get(collection) ?? 0
 }
 
-/** KB 纪元 +1：任何资料变化（摄取 ready/删除/密级授权变更）后调用，使全部答案缓存失效 */
-export async function bumpKbEpoch() {
+/** KB 纪元 +1：该集合资料变化（摄取 ready/删除/密级授权变更）后调用 */
+export async function bumpKbEpoch(collection = '') {
   if (redis) {
-    try { await redis.incr(EPOCH_KEY) } catch { } // Redis 抖动不阻断主链路：最坏情况 = TTL 内旧答案
+    try { await redis.incr(epochKey(collection)) } catch { } // Redis 抖动不阻断主链路：最坏情况 = TTL 内旧答案
   } else {
-    epochMem++
+    epochMem.set(collection, (epochMem.get(collection) ?? 0) + 1)
   }
 }
 

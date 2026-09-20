@@ -18,6 +18,7 @@ import { chatStructured } from '../llm.js'
 import { config } from '../config.js'
 import { gradeMessages, rewriteMessages, GRADE_SCHEMA, REWRITE_SCHEMA } from './prompts.js'
 import { otelSpan } from '../obs/otel.js'
+import { activeCollection } from '../domain/registry.js'
 
 // 子图状态：attempt 记录已尝试次数，queries 是当前生效的查询词列表
 const SearchState = Annotation.Root({
@@ -44,7 +45,7 @@ async function retrieveNode(state, cfg) {
   let mode = 'hybrid-rrf'
   const results = await Promise.all(
     state.queries.map(async (q) => {
-      const r = await hybridSearch({ text: q, vector: await embedOne(q), limit: topK, docId: c.docId, acl: c.acl })
+      const r = await hybridSearch({ text: q, vector: await embedOne(q), limit: topK, docId: c.docId, acl: c.acl, collection: activeCollection() })
       if (r.mode === 'dense-fallback') mode = r.mode // 任一路退化则整体标记
       return r.hits
     })

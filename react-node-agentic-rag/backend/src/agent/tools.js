@@ -4,14 +4,17 @@
 // toolDefs  : 提供给 LLM 的工具 JSON Schema（function calling 规范）
 // runTool   : Action 分发点，按工具名执行并返回 Observation 字符串
 // 设计原则：工具出错不抛异常，而是把错误文本作为 Observation 回喂模型自我修正。
+// M17 接缝：coreDefs 为内核工具；领域工具由 domain/registry.js 注入（domainToolDefs/
+// domainHandlers 查表分发），内核不感知任何领域细节。
 // ============================================================================
 
 import { searchGraph } from './search-graph.js'
 import { validateSchema } from '../schema.js'
 import { fenceUntrusted } from './injection.js'
+import { domainToolDefs, domainHandlers } from '../domain/registry.js'
 
 // 工具的 JSON Schema 描述：LLM 依据 description 和 parameters 决定何时调用、怎么传参
-export const toolDefs = [
+const coreDefs = [
   {
     type: 'function',
     function: {
@@ -48,6 +51,9 @@ export const toolDefs = [
     },
   },
 ]
+
+// M17：提供给 LLM 的完整工具表 = 内核 + 已激活领域包
+export const toolDefs = [...coreDefs, ...domainToolDefs]
 
 // 白名单正则：只允许数字与四则运算符/括号/百分号/空白，杜绝任意代码注入
 const SAFE_EXPR = /^[0-9+\-*/().%\s]+$/
@@ -113,8 +119,12 @@ export async function runTool(name, args, cfg) {
       return calc(String(args.expression ?? ''))
     case 'get_current_time':
       return new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })
-    default:
+    default: {
+      // M17：领域工具查表分发（同款契约：出错转 Observation 回喂模型自我修正）
+      if (domainHandlers[name]) return domainHandlers[name](args, cfg)
       // 模型幻觉工具名 → 友好提示可用工具，引导自我修正
-      return `未知工具 ${name}，可用工具: search_knowledge / calculator / get_current_time`
+      const names = toolDefs.map((d) => d.function.name).join(' / ')
+      return `未知工具 ${name}，可用工具: ${names}`
+    }
   }
 }

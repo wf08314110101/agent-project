@@ -29,6 +29,13 @@ export { ingestBus }
 // 嵌入批大小：CPU 密集，小批多次既保内存可控，又给进度事件提供上报粒度
 const EMBED_BATCH = 16
 
+// M17 切分策略注册表：collection → (text) => [{title, text}]；内核只认接口不认领域。
+// registry 启动时为领域集合注册领域切块器；未注册的集合走内核通用 chunkText
+const chunkerRegistry = new Map()
+export function registerChunker(collection, fn) {
+  chunkerRegistry.set(collection, fn)
+}
+
 /**
  * 创建摄取 worker（工厂函数，便于在 server.js 与 documents 路由中各自实例化/唤醒）
  * @param {object} log - Fastify 日志实例（可为 null，如路由里创建的临时 worker）
@@ -62,7 +69,10 @@ export function createIngestWorker(log) {
       const text = await parseFile(doc.filename, buf)
       if (!text?.trim()) throw new Error('解析结果为空') // 扫描版 PDF 等场景
 
-      const chunks = chunkText(text)
+      // M17：按文档所属集合选切分器（领域包注册的策略 / 内核通用策略）
+      const collection = doc.collection || 'agentic_docs'
+      const chunk = chunkerRegistry.get(collection) ?? ((t) => chunkText(t))
+      const chunks = chunk(text)
       report('processing', 15, { total: chunks.length })
       // 嵌入输入 = 标题 + 正文拼接：标题提供章节上下文，提升向量语义质量
       // 分批嵌入：每批结束上报一次进度（SSE 实时推送），避免长文档全程无反馈
@@ -73,14 +83,20 @@ export function createIngestWorker(log) {
         )
         report('processing', Math.min(90, 15 + Math.round(((i + EMBED_BATCH) / Math.max(1, chunks.length)) * 75)))
       }
-      await ensureCollection() // 幂等：集合不存在则创建
+      await ensureCollection({ collection }) // 幂等：集合不存在则创建（M17 领域集合同款配置）
       // M10 RBAC：密级随块写入 payload（召回前服务端过滤的依据）；ownerDept 从 users 表实时取
       const owner = await getUserById(doc.user_id)
+      // M17 语料治理字段随行写入 payload（检索命中后提示片段可声明"废弃不作为依据"）
+      const extraPayload = doc.source_url
+        ? { sourceUrl: doc.source_url, docVersion: doc.doc_version ?? 1, deprecated: doc.deprecated ?? false }
+        : {}
       const n = await indexChunks({
         docId: doc.id,
         filename: doc.filename,
         chunks,
         vectors,
+        collection,
+        extraPayload,
         acl: { ownerId: doc.user_id, classification: doc.classification ?? 'public', ownerDept: owner?.dept ?? '' },
       })
 

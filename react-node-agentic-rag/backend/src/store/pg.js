@@ -72,6 +72,11 @@ CREATE INDEX IF NOT EXISTS idx_grants_user ON doc_grants(user_id);
 
 -- M12 多实例：抢占时间戳（宕机后由 stale 回收判定"卡死"的 processing）
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS processing_since TIMESTAMPTZ;
+-- M17 领域包：文档归属集合（core=agentic_docs / 领域=rag_<pack>）+ 语料治理三字段
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS collection TEXT NOT NULL DEFAULT 'agentic_docs';
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS doc_version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS deprecated BOOLEAN NOT NULL DEFAULT false;
 -- M14 无状态鉴权：token_ver 进 JWT（改角色 +1 即刻失效旧 token）；refresh 单活哈希（旋转复用）
 ALTER TABLE users ADD COLUMN IF NOT EXISTS token_ver INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS refresh_hash TEXT;
@@ -138,12 +143,15 @@ export async function backfillDocsToUser(userId) {
   return r.rowCount
 }
 
-// ---- documents：摄取队列 + 文档管理（M10 起带密级/标签/授权）----
-export async function insertDoc(id, filename, size, hash, chunks, status, error, path, userId, classification, tags) {
+// ---- documents：摄取队列 + 文档管理（M10 起带密级/标签/授权；M17 起带集合/语料治理字段）----
+// extra（M17 可选）：{ collection, sourceUrl, docVersion, deprecated }——手动上传不传，走 core 缺省
+export async function insertDoc(id, filename, size, hash, chunks, status, error, path, userId, classification, tags, extra = {}) {
   await q(
-    `INSERT INTO documents (id, filename, size, hash, chunks, status, error, path, user_id, classification, tags)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)`,
-    [id, filename, size, hash, chunks, status, error, path, userId, classification, jsonParam(tags)]
+    `INSERT INTO documents (id, filename, size, hash, chunks, status, error, path, user_id, classification, tags,
+                            collection, source_url, doc_version, deprecated)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15)`,
+    [id, filename, size, hash, chunks, status, error, path, userId, classification, jsonParam(tags),
+      extra.collection || 'agentic_docs', extra.sourceUrl ?? '', extra.docVersion ?? 1, extra.deprecated ?? false]
   )
 }
 // 可见列表：本人 ∪ public ∪ 同部门(dept) ∪ 被显式授权；admin 走 listDocsAll 全量
@@ -178,6 +186,10 @@ export async function getDoc(id) {
 }
 export async function getDocByHash(hash) {
   return (await q('SELECT * FROM documents WHERE hash = $1', [hash])).rows[0]
+}
+// M17 连接器：按溯源 URL 找同源文档（内容变更时做版本化替换）
+export async function getDocBySourceUrl(sourceUrl) {
+  return (await q('SELECT * FROM documents WHERE source_url = $1 ORDER BY created_at DESC LIMIT 1', [sourceUrl])).rows[0]
 }
 export async function deleteDocRow(id) {
   await q('DELETE FROM documents WHERE id = $1', [id])

@@ -24,6 +24,7 @@ import { createIngestWorker } from './rag/ingest.js'
 import { closeBus } from './rag/bus.js'
 import { seedUsers, initAuthCache, currentTokenVer } from './auth.js'
 import { initAnswerCache } from './rag/answer-cache.js'
+import { applyDomain, packs } from './domain/registry.js'
 import healthRoutes from './routes/health.js'
 import authRoutes from './routes/auth.js'
 import documentRoutes from './routes/documents.js'
@@ -90,6 +91,9 @@ app.decorate('authenticate', async (req, reply) => {
 // 预置用户播种：AUTH_USERS → users 表（scrypt 哈希，幂等）
 await seedUsers(app.log)
 
+// M17 领域包激活：标签词表/切分器/提示片段注入（在任何路由请求前完成）
+await applyDomain(app.log)
+
 // ---- 业务路由 ----
 app.register(healthRoutes)    // GET  /api/health          健康检查（开放，供容器探活）
 app.register(authRoutes)      // POST /api/auth/login      登录（开放，限流单独收紧）
@@ -117,8 +121,10 @@ const ingest = createIngestWorker(app.log)
 await ingest.start()
 
 // 启动即确保集合存在（幂等；Qdrant 未就绪不阻塞启动，上传时会再 ensure）
+// M17：core 集合 + 各激活领域包集合一次 ensure（领域包删除集合即随包下线）
 try {
   await ensureCollection()
+  for (const p of packs) await ensureCollection({ collection: p.collection })
 } catch (e) {
   app.log.warn(`[qdrant] 启动检查失败: ${e.message}`)
 }

@@ -61,6 +61,17 @@ mock.module('../src/obs/otel.js', {
   },
 })
 
+// M17：registry 桩掉（切断 domain → ingest → pg/qdrant 真实依赖链，MCP 核心测试不需要领域包）
+mock.module('../src/domain/registry.js', {
+  namedExports: {
+    domainToolDefs: [],
+    domainHandlers: {},
+    activeCollection: () => 'test_collection',
+    packs: [],
+    applyDomain: async () => {},
+  },
+})
+
 const { handleToolCall, handleResourceRead, TOOL_DEFS } = await import('../src/mcp/mcp-server.js')
 
 const D = (over = {}) => ({ id: 'd1', user_id: 'm1', classification: 'public', status: 'ready', filename: 'crag.pdf', chunks: 3, tags: [], ...over })

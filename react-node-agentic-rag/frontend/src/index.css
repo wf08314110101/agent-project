@@ -45,7 +45,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 ::-webkit-scrollbar-thumb:hover { background: #bcc2cf; }
 ::-webkit-scrollbar-track { background: transparent; }
 
-.app { max-width: 860px; margin: 0 auto; padding: 16px; }
+.app { max-width: 1080px; margin: 0 auto; padding: 16px; }
 
 /* ---------- 顶栏 ---------- */
 .app-header {
@@ -285,7 +285,7 @@ main { margin-top: 16px; }
 
 .docs { overflow-x: auto; }
 .docs table {
-  width: 100%; min-width: 880px; border-collapse: separate; border-spacing: 0;
+  width: 100%; min-width: 1048px; border-collapse: separate; border-spacing: 0;
   background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
   box-shadow: var(--shadow-sm);
 }

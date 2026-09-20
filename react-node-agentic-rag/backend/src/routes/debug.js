@@ -10,6 +10,7 @@
 
 import { retrieve } from '../rag/retriever.js'
 import { aclFor } from '../acl.js'
+import { getDoc } from '../store/pg.js'
 
 export default async function (app) {
   app.get('/api/debug/retrieval', async (req, reply) => {
@@ -20,7 +21,14 @@ export default async function (app) {
 
     const started = Date.now()
     // M10 RBAC：调试口同样受 ACL 约束（admin 全通；member 只看可读资料），避免观测口绕过权限
-    const hits = await retrieve(q, topK, docId, await aclFor(req.user))
+    // M17 定向集合：docId 观测按文档所属集合检索（与 chat 文档级 QA 同语义）
+    let collection
+    if (docId) {
+      const doc = await getDoc(docId)
+      if (!doc) return reply.code(404).send({ error: '文档不存在' })
+      collection = doc.collection
+    }
+    const hits = await retrieve(q, topK, docId, await aclFor(req.user), collection)
     return {
       query: q,
       topK,

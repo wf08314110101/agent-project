@@ -102,7 +102,7 @@ export function createIngestWorker(log) {
 
       await setDocChunks(n, doc.id)
       await setDocStatus('ready', null, doc.id)
-      await fs.rm(doc.path, { force: true }) // 原件用完即删（省磁盘）
+      // M17 起原件保留（预览功能依赖 doc.path 读原文）；空间敏感场景可改回即删
       report('ready', 100, { chunks: n })
       log?.info?.(`[ingest] ${doc.filename} → ready（${n} 块）`)
     } catch (e) {

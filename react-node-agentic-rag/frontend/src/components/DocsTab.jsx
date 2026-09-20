@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { apiFetch, streamDocEvents, updateDoc, fetchUsers } from '../api.js'
+import { apiFetch, streamDocEvents, updateDoc, fetchUsers, fetchMeta, previewDoc } from '../api.js'
 
 const STATUS_META = {
   pending: { text: '排队中', cls: 'st-pending' },
@@ -13,7 +13,8 @@ const CLS_META = {
   private: { text: '私有', cls: 'cls-private' },
 }
 export const CLASSIFICATIONS = ['public', 'dept', 'private']
-export const TAG_WHITELIST = ['技术方案', '制度', '会议纪要', '运维', '竞品', '测试']
+// M17 集合友好名：内部集合名不进 UI，未知集合回退原名
+const COLLECTION_META = { agentic_docs: '核心库', rag_api_docs: 'API 文档' }
 const parseTags = (s) => { try { return JSON.parse(s) ?? [] } catch { return [] } }
 
 export default function DocsTab({ user, onAsk }) {
@@ -29,9 +30,15 @@ export default function DocsTab({ user, onAsk }) {
   // 行内编辑器：编辑目标文档 id + 表单状态；users 仅 admin 可拉取（403 时为空数组）
   const [editing, setEditing] = useState(null) // { id, classification, tags: [], grants: [] }
   const [users, setUsers] = useState([])
+  // M17 标签词表动态化：随领域包注入变化（/api/meta），不再前端硬编码
+  const [tagList, setTagList] = useState([])
   const timerRef = useRef(null)
 
   const isAdmin = user?.role === 'admin'
+
+  useEffect(() => {
+    fetchMeta().then((m) => setTagList(m.tagWhitelist ?? [])).catch(() => {})
+  }, [])
 
   const load = async () => {
     try {
@@ -110,9 +117,17 @@ export default function DocsTab({ user, onAsk }) {
 
   // 打开行内编辑器：预填当前密级/标签/授权；admin 顺带拉用户列表供授权勾选
   function openEdit(d) {
-    setEditing({ id: d.id, classification: d.classification ?? 'private', tags: parseTags(d.tags), grants: d.grants ?? [] })
+    setEditing({ id: d.id, filename: d.filename, classification: d.classification ?? 'private', tags: parseTags(d.tags), grants: d.grants ?? [] })
     if (isAdmin) fetchUsers().then(setUsers).catch(() => setUsers([]))
   }
+
+  // 编辑弹窗：Esc 关闭（遮罩点击关闭在 overlay onClick 上）
+  useEffect(() => {
+    if (!editing) return
+    const onKey = (e) => e.key === 'Escape' && setEditing(null)
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [editing])
 
   async function saveEdit() {
     try {
@@ -153,7 +168,7 @@ export default function DocsTab({ user, onAsk }) {
           {CLASSIFICATIONS.map((c) => <option key={c} value={c}>{CLS_META[c].text}</option>)}
         </select>
         <div className="tag-picker">
-          {TAG_WHITELIST.map((t) => (
+          {tagList.map((t) => (
             <button
               key={t}
               type="button"
@@ -173,7 +188,7 @@ export default function DocsTab({ user, onAsk }) {
             {CLS_META[c].text}
           </button>
         ))}
-        {TAG_WHITELIST.map((t) => (
+        {tagList.map((t) => (
           <button key={t} className={`filter-chip ${fTag === t ? 'on' : ''}`} onClick={() => setFTag(fTag === t ? '' : t)}>
             #{t}
           </button>
@@ -182,7 +197,7 @@ export default function DocsTab({ user, onAsk }) {
       {msg && <div className="doc-msg">{msg}</div>}
       <table>
         <thead>
-          <tr><th>文件名</th><th>密级/标签</th><th>大小</th><th>状态</th><th>分块</th><th>入库时间</th><th></th></tr>
+          <tr><th>文件名</th><th>集合</th><th>密级/标签</th><th>大小</th><th>状态</th><th>分块</th><th>入库时间</th><th></th></tr>
         </thead>
         <tbody>
           {visible.map((d) => {
@@ -193,8 +208,21 @@ export default function DocsTab({ user, onAsk }) {
             return (
               <tr key={d.id}>
                 <td>
-                  {d.filename}
+                  <button
+                    className="link-filename"
+                    disabled={d.status !== 'ready'}
+                    title={d.status === 'ready' ? '点击预览原文（新标签页）' : '摄取就绪后可预览'}
+                    onClick={() => previewDoc(d)}
+                  >
+                    {d.filename}
+                  </button>
+                  {d.status === 'ready' && d.deprecated && <span className="owner-tag" title="已废弃资料，仅作历史参考">已废弃</span>}
                   {!mine && <span className="owner-tag" title={`归属: ${d.owner_name ?? '他人'}${d.owner_dept ? ' · ' + d.owner_dept : ''}`}>{d.owner_name ?? '他人'}</span>}
+                </td>
+                <td>
+                  <span className="cls-badge col-collection" title={`集合: ${d.collection ?? '-'}`}>
+                    {COLLECTION_META[d.collection] ?? d.collection ?? '-'}
+                  </span>
                 </td>
                 <td>
                   <span className={`cls-badge ${cm.cls}`}>{cm.text}</span>
@@ -225,41 +253,46 @@ export default function DocsTab({ user, onAsk }) {
             )
           })}
           {visible.length === 0 && (
-            <tr><td colSpan="7" className="empty">暂无文档</td></tr>
+            <tr><td colSpan="8" className="empty">暂无文档</td></tr>
           )}
         </tbody>
       </table>
       {editing && (
-        <div className="doc-editor">
-          <div className="editor-row">
-            <label>密级</label>
-            <select
-              value={editing.classification}
-              onChange={(e) => setEditing({ ...editing, classification: e.target.value })}
-            >
-              {CLASSIFICATIONS.map((c) => <option key={c} value={c}>{CLS_META[c].text}</option>)}
-            </select>
-            <span className="hint">
-              {editing.classification === 'public' && '全体登录用户可读'}
-              {editing.classification === 'dept' && '与归属人同部门可读'}
-              {editing.classification === 'private' && '仅本人与被授权用户可读'}
-            </span>
-          </div>
-          <div className="editor-row">
-            <label>标签</label>
-            <div className="tag-picker">
-              {TAG_WHITELIST.map((t) => (
-                <button
-                  key={t}
-                  type="button"
-                  className={`tag-chip ${editing.tags.includes(t) ? 'on' : ''}`}
-                  onClick={() => setEditing({ ...editing, tags: toggle(editing.tags, t) })}
-                >
-                  {t}
-                </button>
-              ))}
+        <div className="doc-editor-overlay" onClick={() => setEditing(null)}>
+          <div className="doc-editor" onClick={(e) => e.stopPropagation()}>
+            <div className="editor-head">
+              <span className="editor-title">文档设置 · {editing.filename}</span>
+              <button className="editor-close" onClick={() => setEditing(null)} title="关闭 (Esc)">×</button>
             </div>
-          </div>
+            <div className="editor-row">
+              <label>密级</label>
+              <select
+                value={editing.classification}
+                onChange={(e) => setEditing({ ...editing, classification: e.target.value })}
+              >
+                {CLASSIFICATIONS.map((c) => <option key={c} value={c}>{CLS_META[c].text}</option>)}
+              </select>
+              <span className="hint">
+                {editing.classification === 'public' && '全体登录用户可读'}
+                {editing.classification === 'dept' && '与归属人同部门可读'}
+                {editing.classification === 'private' && '仅本人与被授权用户可读'}
+              </span>
+            </div>
+            <div className="editor-row">
+              <label>标签</label>
+              <div className="tag-picker">
+                {tagList.map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    className={`tag-chip ${editing.tags.includes(t) ? 'on' : ''}`}
+                    onClick={() => setEditing({ ...editing, tags: toggle(editing.tags, t) })}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+            </div>
           {isAdmin && users.length > 0 && (
             <div className="editor-row">
               <label>授权</label>
@@ -281,6 +314,7 @@ export default function DocsTab({ user, onAsk }) {
           <div className="editor-actions">
             <button className="ask" onClick={saveEdit}>保存</button>
             <button className="del" onClick={() => setEditing(null)}>取消</button>
+          </div>
           </div>
         </div>
       )}

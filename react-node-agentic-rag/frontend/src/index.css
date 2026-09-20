@@ -189,7 +189,11 @@ main { margin-top: 16px; }
 .user-role { background: #1a1d26; color: #ffd66e; }
 .cls-select { padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; background: var(--card); }
 .owner-tag { margin-left: 8px; font-size: 12px; color: var(--muted); background: #f2f3f5; padding: 1px 7px; border-radius: 9px; }
+.link-filename { background: transparent; color: inherit; padding: 0; font: inherit; cursor: pointer; text-decoration: underline dotted; text-underline-offset: 3px; }
+.link-filename:hover:not(:disabled) { color: var(--brand); }
+.link-filename:disabled { cursor: not-allowed; color: var(--muted); text-decoration: none; }
 .cls-badge { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 9px; margin-right: 6px; }
+.col-collection { background: #f0f2f5; color: #555; margin-right: 0; }
 .cls-public { background: #e3f6e8; color: #1a7f37; }
 .cls-dept { background: #eef2ff; color: #4353c9; }
 .cls-private { background: #fff1e0; color: #b26a00; }
@@ -206,10 +210,23 @@ main { margin-top: 16px; }
   background: var(--card); border: 1px solid var(--line); color: var(--muted);
 }
 .tag-chip.on { background: var(--brand-weak); border-color: var(--brand); color: var(--brand); }
-.doc-editor {
-  margin-top: 14px; padding: 14px; background: var(--card);
-  border: 1px solid var(--line); border-radius: 10px; display: flex; flex-direction: column; gap: 10px;
+/* 编辑弹窗（M17）：全屏遮罩 + 居中卡片，替代表格下方内联面板 */
+.doc-editor-overlay {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(15, 17, 22, 0.45); backdrop-filter: blur(2px);
+  display: flex; align-items: center; justify-content: center; padding: 20px;
 }
+.doc-editor {
+  width: min(560px, 100%); max-height: 80vh; overflow: auto;
+  padding: 16px; background: var(--card);
+  border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.25);
+  display: flex; flex-direction: column; gap: 10px;
+}
+.editor-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.editor-title { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.editor-close { background: transparent; color: var(--muted); font-size: 20px; padding: 0 6px; line-height: 1; }
+.editor-close:hover { color: var(--warn); }
 .editor-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .editor-row > label { font-size: 13px; color: var(--muted); width: 32px; }
 .editor-actions { display: flex; gap: 8px; }

@@ -51,8 +51,11 @@ export default async function (app) {
       const { question, topK = 5, sessionId, docId } = req.body ?? {}
       if (!question?.trim()) return reply.code(400).send({ error: 'question 必填' })
       // 指定文档问答：docId 必须对当前用户可读（RBAC 单点判定），否则 404 不泄露存在性
+      // M17 定向集合：文档级 QA 按文档所属集合检索（用户显式点名，定向无歧义），
+      // 通用问答仍走 activeCollection()（单激活语义不变）
+      let doc = null
       if (docId) {
-        const doc = await getDoc(docId)
+        doc = await getDoc(docId)
         if (!doc || !(await canReadDoc(req.user, doc))) return reply.code(404).send({ error: '文档不存在' })
       }
 
@@ -109,8 +112,9 @@ export default async function (app) {
       let cached = null
       if (config.answerCache.ttlSec > 0) {
         try {
+          // M17 定向集合：缓存键 epoch 取文档所属集合（定向检索的语料更新才失效这条缓存，防脏读）
           acl = await aclFor(req.user) // M10 RBAC：缓存键指纹 + 召回过滤共用
-          cacheKey = answerCacheKey({ question, topK, docId, acl, epoch: await kbEpoch(activeCollection()) })
+          cacheKey = answerCacheKey({ question, topK, docId, acl, epoch: await kbEpoch(doc?.collection ?? activeCollection()) })
           cached = await getAnswer(cacheKey)
         } catch { } // pg/Redis 抖动 → 按未命中走主链路
       }
@@ -200,6 +204,7 @@ export default async function (app) {
             emit,
             usageAcc,
             docId, // 指定文档问答范围（可选），贯穿到 search_kb 子图
+            collection: doc?.collection, // M17 定向集合：文档级 QA 检索文档所属集合
             acl,
           })
         )

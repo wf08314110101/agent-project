@@ -19,8 +19,9 @@ import { activeCollection } from '../domain/registry.js'
  * @returns {Promise<Array>} 命中块（阈值已在稠密路 prefetch 服务端应用；
  *          融合分为排名分，不再二次过滤）
  */
-export async function retrieve(question, topK = 5, docId, acl) {
+export async function retrieve(question, topK = 5, docId, acl, collection) {
   const vector = await embedOne(question)
-  const { hits } = await hybridSearch({ text: question, vector, limit: topK, docId, acl, collection: activeCollection() })
+  // M17 定向集合：docId 观测时调用方传文档所属集合；缺省走激活集合
+  const { hits } = await hybridSearch({ text: question, vector, limit: topK, docId, acl, collection: collection ?? activeCollection() })
   return hits
 }

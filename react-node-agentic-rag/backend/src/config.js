@@ -32,7 +32,7 @@ export const config = {
   redis: {
     url: env('REDIS_URL', ''),
   },
-  uploadsDir: env('UPLOADS_DIR', './data/uploads'),           // 摄取队列暂存原件（worker 处理完即删）
+  uploadsDir: env('UPLOADS_DIR', './data/uploads'),           // 摄取原件暂存（M17 起摄取完成后保留，供预览接口读原文）
 
   // ---- 限流（每分钟）：全局 + chat 单独收紧 ----
   rate: {

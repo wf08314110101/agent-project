@@ -117,7 +117,9 @@ export async function handleToolCall(name, args = {}, { user, log = console } = 
       const q = String(args.query)
       const vector = await embedOne(q)
       const acl = await aclFor(u) // ACL 下沉 Qdrant：public ∪ 本人 ∪ 同部门 ∪ 显式授权
-      const { hits } = await hybridSearch({ text: q, vector, limit: k, docId: args.docId, acl, collection: activeCollection() })
+      // M17 定向集合：带 docId 时按文档所属集合检索（与 chat 文档级 QA 同语义）
+      const doc = args.docId ? await getDoc(args.docId) : null
+      const { hits } = await hybridSearch({ text: q, vector, limit: k, docId: args.docId, acl, collection: doc?.collection ?? activeCollection() })
       if (!hits.length) return text(`知识库中没有找到与「${q}」相关的资料。`)
       const body = hits
         .map(

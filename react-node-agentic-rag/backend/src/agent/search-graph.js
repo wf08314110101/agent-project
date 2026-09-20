@@ -45,7 +45,8 @@ async function retrieveNode(state, cfg) {
   let mode = 'hybrid-rrf'
   const results = await Promise.all(
     state.queries.map(async (q) => {
-      const r = await hybridSearch({ text: q, vector: await embedOne(q), limit: topK, docId: c.docId, acl: c.acl, collection: activeCollection() })
+      // M17 定向集合：文档级 QA（docId）按文档所属集合检索，通用问答走激活集合
+      const r = await hybridSearch({ text: q, vector: await embedOne(q), limit: topK, docId: c.docId, acl: c.acl, collection: c.collection ?? activeCollection() })
       if (r.mode === 'dense-fallback') mode = r.mode // 任一路退化则整体标记
       return r.hits
     })

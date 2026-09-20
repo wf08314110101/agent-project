@@ -152,3 +152,20 @@ export const updateDoc = (id, patch) =>
     body: JSON.stringify(patch),
   })
 export const fetchUsers = () => apiFetch('/api/admin/users').then((r) => (r.ok ? r.json() : []))
+
+// 前端元信息（公开）：当前生效标签词表——随领域包注入变化，编辑器/筛选器动态取
+export const fetchMeta = () => apiFetch('/api/meta').then((r) => (r.ok ? r.json() : { tagWhitelist: [] }))
+
+// 文档预览（M17）：鉴权拉原文 → blob URL 交给浏览器原生渲染（pdf 阅读器 / 纯文本），
+// 不在前端引入 markdown 渲染库；新标签页打开，60s 后回收 blob URL
+export async function previewDoc(doc) {
+  const res = await apiFetch(`/api/documents/${doc.id}/content`)
+  if (!res.ok) throw new Error(`预览失败 HTTP ${res.status}`)
+  const url = URL.createObjectURL(await res.blob())
+  const a = document.createElement('a')
+  a.href = url
+  a.target = '_blank'
+  a.rel = 'noopener'
+  a.click()
+  setTimeout(() => URL.revokeObjectURL(url), 60_000)
+}

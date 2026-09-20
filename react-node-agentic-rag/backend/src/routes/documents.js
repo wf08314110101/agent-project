@@ -17,7 +17,7 @@ import {
 } from '../store/pg.js'
 import { deleteDocPoints, setDocAclPayload } from '../rag/qdrant.js'
 import { bumpKbEpoch } from '../rag/answer-cache.js'
-import { CLASSIFICATIONS, sanitizeTags } from '../acl.js'
+import { canReadDoc, CLASSIFICATIONS, sanitizeTags } from '../acl.js'
 import { config } from '../config.js'
 import { packs } from '../domain/registry.js'
 
@@ -88,6 +88,19 @@ export default async function (app) {
   app.get('/api/documents', async (req) =>
     req.user.role === 'admin' ? listDocsAll() : listDocsVisible(req.user.sub, req.user.dept)
   )
+
+  // 原文预览（M17）：canReadDoc 单点鉴权 + 原样返回文件字节，渲染交给浏览器原生
+  // Content-Type 按扩展名映射：pdf → application/pdf（浏览器阅读器）；md/txt/html 一律
+  // text/plain——html 不允许 inline 打开（blob URL 继承同源会执行脚本，XSS 面必须关死）。
+  // 不可读按 404（不泄露存在性）；原件缺失（未落盘/已清理）也 404，前端仅 ready 可点。
+  app.get('/api/documents/:id/content', async (req, reply) => {
+    const doc = await getDoc(req.params.id)
+    if (!doc || !(await canReadDoc(req.user, doc))) return reply.code(404).send({ error: '文档不存在' })
+    const buf = await fs.readFile(doc.path).catch(() => null)
+    if (buf == null) return reply.code(404).send({ error: '原文缺失' })
+    const ext = doc.filename.toLowerCase().split('.').pop()
+    return reply.type(ext === 'pdf' ? 'application/pdf' : 'text/plain; charset=utf-8').send(buf)
+  })
 
   // 摄取进度 SSE：连接即推一帧全量快照（docs 事件），之后订阅 worker 的 doc 事件实时推送
   // 快照与列表接口同口径（可见集合）；doc 事件仅推本人文档（admin 额外收全部），他人文档变化靠刷新列表

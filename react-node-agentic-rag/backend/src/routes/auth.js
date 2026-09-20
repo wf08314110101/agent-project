@@ -10,6 +10,7 @@
 
 import { checkLogin, newRefreshToken, sha256 } from '../auth.js'
 import { setRefreshToken, getUserByRefreshHash } from '../store/pg.js'
+import { getTagWhitelist } from '../acl.js'
 import { config } from '../config.js'
 
 const REFRESH_MS = () => config.auth.refreshDays * 86400_000
@@ -77,4 +78,8 @@ export default async function (app) {
     }
     return { ok: true }
   })
+
+  // 前端元信息（公开）：当前生效标签词表——领域包注入后词表随模式变化，
+  // 前端编辑器/筛选器必须动态取（硬编码会在领域模式下设置出被后端过滤成空的标签）
+  app.get('/api/meta', async () => ({ tagWhitelist: getTagWhitelist() }))
 }

@@ -16,6 +16,11 @@ export const CLASSIFICATIONS = ['public', 'dept', 'private']
 // M17 集合友好名：内部集合名不进 UI，未知集合回退原名
 const COLLECTION_META = { agentic_docs: '核心库', rag_api_docs: 'API 文档' }
 const parseTags = (s) => { try { return JSON.parse(s) ?? [] } catch { return [] } }
+// ISO 时间戳 → 本地短格式（无秒/时区后缀）
+const fmtTime = (iso) => {
+  const d = new Date(iso)
+  return isNaN(d) ? iso : d.toLocaleString('zh-CN', { hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
 
 export default function DocsTab({ user, onAsk }) {
   const [docs, setDocs] = useState([])
@@ -232,11 +237,11 @@ export default function DocsTab({ user, onAsk }) {
                 <td>
                   <span className={`doc-status ${st.cls}`} title={d.error || ''}>
                     {st.text}
-                    {d.status === 'processing' && d.progress != null ? ` ${d.progress}%` : ' …'}
+                    {d.status === 'processing' && (d.progress != null ? ` ${d.progress}%` : ' …')}
                   </span>
                 </td>
                 <td>{d.status === 'ready' ? d.chunks : '-'}</td>
-                <td>{d.created_at}</td>
+                <td>{fmtTime(d.created_at)}</td>
                 <td className="row-actions">
                   <button
                     className="ask"

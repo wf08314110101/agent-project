@@ -26,6 +26,7 @@ React 5174 ──SSE── Fastify 8788 ──┬── DeepSeek (LLM, 工具调
 - **工具调用**：search_knowledge / calculator / get_current_time；参数 schema 校验门、同参重复调用检测、同批多工具并行执行；超 6 轮强制直答防死循环
 - **引用锚点**：检索块全局唯一编号，回答行内 [n] 可点击跳转对应来源卡片；指定文档问答（DocsTab「提问」→ 仅在该文档范围、按其所属集合定向检索）
 - **文档预览（M17）**：摄取原件保留（不再处理完即删），`GET /api/documents/:id/content` 原样回传（canReadDoc 鉴权，pdf 浏览器原生渲染，文本类 text/plain，html 不 inline 防 XSS），前端点文件名新标签页预览
+- **语料时效与冲突治理（M18）**：文档版本组 `docKey` + `docVersion/effectiveDate` 元数据贯通（上传 → payload → 检索 → 前端徽标）；同 docKey 重传自动**版本化替换**（`DOC_REPLACE_MODE=off|auto|on`，默认 core 关、领域集合开）；检索层**版本消解**（同组旧版块剔除，最新版全量保留；docId 定向旧版仍可查）+ **deprecated 降权**（`DEPRECATED_PENALTY=0.3`，降权非硬滤）；grade 增 `conflict` 冲突标记，答案按版本取舍或列明双方
 - **会话**：多轮上下文（超窗滚动摘要压缩，seq 断点零丢失）、消息+步骤+来源持久化回放、会话增删
 - **思维链通道**：reasoning token 走独立 SSE 事件（deepseek-reasoner 等模型自动生效），前端折叠面板展示，不与正文混流
 - **鉴权**：预置用户 + JWT 登录（scrypt 存储密码），会话/文档按用户隔离；登录接口单独限流
@@ -77,6 +78,8 @@ docker compose up -d backend frontend
 | `AUTH_USERS` | - | 预置用户 `用户名:密码[:角色[:部门]]`（M10），角色 member/admin；启动播种（不配则无人能登录） |
 | `MCP_ENABLED` / `MCP_ACCESS_USER` / `MCP_HTTP_TOKEN` | true / - / - | MCP Server（M13）：服务身份用户名（空 = 仅 public 匿名）/ 非空才挂 `POST /mcp`（Bearer）；stdio 入口不受这两项控制 |
 | `DOMAIN_PACKS` | 空 | 领域包单激活（M17，当前可选 `api-docs`）：主检索集合切 `rag_api_docs`、标签词表/切分策略/提示片段由包注入、上传接受 `collection=rag_api_docs`；留空 = 纯 core 零破坏 |
+| `DOC_REPLACE_MODE` | `auto` | 版本化替换（M18）：同 docKey 重传内容变化时删旧插新（version+1）。`off`=不替换新旧共存 ｜ `on`=全集合替换 ｜ `auto`=core 关、领域集合开 |
+| `DEPRECATED_PENALTY` | `0.3` | deprecated 文档命中融合分乘数（M18，降权非硬滤——明确问旧版仍可召回；1 = 不降权） |
 | `DOMAIN_SYNC_INTERVAL_MIN` / `DOMAIN_SYNC_MAX_FILES` | 0 / 40 | 连接器定时同步间隔分钟（0 = 仅手动 `npm run domain:sync`）/ 单次最多摄取文件数 |
 | `DOMAIN_SYNC_REPO` / `DOMAIN_SYNC_BRANCH` / `DOMAIN_SYNC_DIR` / `DOMAIN_SYNC_DEPRECATED_DIR` | vuejs-translations/docs-zh-cn / main / src/ / 空 | 同步源 GitHub md 仓库 / 分支 / 子目录 / 废弃区子目录（deprecated 标注） |
 | `GITHUB_TOKEN` | - | GitHub API Token（可选，防匿名 60 次/h 限流） |
@@ -88,7 +91,7 @@ docker compose up -d backend frontend
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/auth/login` | 登录 → `{token}`（唯一开放的写入口，限流 10/min） |
-| POST | `/api/documents` | multipart 上传（可带 `classification`/`tags`/`collection`——collection 仅接受已启用领域包集合，M17），202 入队（`duplicated: true` 表示重复） |
+| POST | `/api/documents` | multipart 上传（可带 `classification`/`tags`/`collection`/`docKey`/`effectiveDate`，M18 起同 docKey 重传按 `DOC_REPLACE_MODE` 版本化替换），202 入队（`duplicated: true` 表示重复） |
 | GET | `/api/documents` | 可见集合：本人 ∪ public ∪ 同部门(dept) ∪ 被授权；admin 全量 |
 | GET | `/api/documents/:id/content` | 原文预览：原样回传字节（pdf→application/pdf，其余→text/plain）；不可读/原件缺失 404 |
 | GET | `/api/documents/events` | 摄取进度 SSE（`docs` 快照 + `doc` 单文档进度%），按可见性推送 |
@@ -162,9 +165,9 @@ node scripts/regression.mjs          # 需先起服务；自动以 demo/demo123 
 AUTH_USER=alice AUTH_PASS=xxx node scripts/regression.mjs    # 换账号
 BASE_URL=http://localhost:8080 node scripts/regression.mjs   # 打容器栈
 
-# 质量水位（M6，M17 起双轨）：core 60 题 + domain 业务 12 题，各自独立基线与门禁
+# 质量水位（M6，M17 起双轨）：core 62 题 + domain 业务 12 题，各自独立基线与门禁
 node scripts/evaluate.mjs --layer retrieval            # 双轨检索层：recall@k / MRR / purity（零 LLM，秒级）
-node scripts/evaluate.mjs --suite core                 # 只跑 core 轨（冻结 60 题，内核回归门禁）
+node scripts/evaluate.mjs --suite core                 # 只跑 core 轨（冻结 62 题，内核回归门禁）
 node scripts/evaluate.mjs --suite domain               # 只跑 domain 轨（业务题，要求 DOMAIN_PACKS=api-docs 启动）
 node scripts/evaluate.mjs                              # 全量：双轨 + 答案层 mustOk / faithfulness / relevance
 node scripts/evaluate.mjs --baseline evals/results/<旧档>.json   # 与基线对比（调参前后 A/B）
@@ -172,7 +175,7 @@ node scripts/evaluate.mjs --detail                     # 逐题明细（期望�
 node scripts/evaluate.mjs --suite core --layer retrieval --assert "recall>=0.85,mrr>=0.7,purity=1"  # 阈值门禁（逐轨，CI 已挂）
 ```
 
-检索调参流程：改 `RETRIEVE_MIN_SCORE` / chunk 策略 / rerank 前跑一次存基线，改完 `--baseline` 对比数字。基线（core 轨 60 题）：recall@5=1.0，MRR=0.985，purity=1，mustOkRate=1，faithfulness=0.994（竞争文档歧义题 mrr=0.5，是 rerank 实验的靶子）。注意：批量摄取后等 Qdrant 索引优化结束再评估，否则 HNSW 未收敛数字会抖。
+检索调参流程：改 `RETRIEVE_MIN_SCORE` / chunk 策略 / rerank 前跑一次存基线，改完 `--baseline` 对比数字。基线（core 轨 62 题，M18）：recall@5=0.989，MRR=0.954，purity=1（竞争文档歧义题 Q1 为 M8 定性的语料级歧义，持续存在）。注意：批量摄取后等 Qdrant 索引优化结束再评估，否则 HNSW 未收敛数字会抖。
 
 M8 rerank 实验结论（`scripts/rerank-exp.mjs`，34 题 × 5 组合）：dbsf / 召回池×8 / dense 精排三种服务端策略 MRR 均在 0.971~0.985 打平（差异=1 题 rank，无显著性），**歧义题 rr=0.50 在所有策略下不变——「旧版检索基线」块语义字面双近，属语料级歧义，服务端排序无解**，后续方向是 cross-encoder 客户端 rerank 或语料治理。实验参数保留为 `RETRIEVE_FUSION` / `RETRIEVE_PREFETCH_MUL` 开关，默认维持 rrf。实验顺带修了两个潜伏 bug：dense-fallback 退化查询缺 `using:'dense'`（命名向量集合下必 400）；warn 现在带服务端 detail。
 
@@ -198,7 +201,7 @@ backend/src/  server·config·auth·acl ｜ routes/(auth·chat·documents·sessi
               domain/(registry + api-docs 五件套：index·tools·chunker·prompts·connector·evals)  # M17 领域包
 frontend/src/ App ｜ components/(Login·ChatTab·DocsTab) ｜ api(token + SSE 解析)
 scripts/      regression.mjs（回归）· evaluate.mjs（评估，--suite 双轨）· backend/scripts/(mcp-smoke.mjs·domain-sync.mjs) · migrate-sqlite-to-pg.mjs（M11 迁移）
-evals/        golden-core.jsonl（core 60 题标注）· fixtures/（8 文档）· results/（基线存档）；domain 轨随包：domain/api-docs/evals/
+evals/        golden-core.jsonl（core 62 题标注）· fixtures/（10 文档 + 版本组 sidecar）· results/（基线存档）；domain 轨随包：domain/api-docs/evals/
 .github/      workflows/ci.yml（回归 + 镜像构建）
 docs/         功能演进时间线.md
 ```

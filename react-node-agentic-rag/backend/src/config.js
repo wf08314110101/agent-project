@@ -149,4 +149,8 @@ export const config = {
     syncIntervalMin: int('DOMAIN_SYNC_INTERVAL_MIN', 0), // 连接器定时同步间隔（分钟）；0 = 仅手动 npm run domain:sync
     githubToken: env('GITHUB_TOKEN', ''),            // GitHub API Token（可选，防 60 次/h 限流）
   },
+
+  // ---- M18 语料时效治理：版本化替换 + 检索层废弃降权 ----
+  docReplaceMode: env('DOC_REPLACE_MODE', 'auto'),   // off=不替换（新旧共存）| on=全替换 | auto=core 关、领域集合开
+  deprecatedPenalty: Number(env('DEPRECATED_PENALTY', '0.3')), // deprecated 命中融合分乘数（1 = 不降权；降权非硬滤，保住"明确问旧版"的召回）
 }

@@ -39,6 +39,11 @@ export default async function (app) {
         filename: h.filename ?? '',
         chunkIndex: h.chunkIndex,
         text: h.text,
+        // M18 语料时效元数据（观测/评估用）
+        docVersion: h.docVersion,
+        docKey: h.docKey,
+        effectiveDate: h.effectiveDate,
+        deprecated: h.deprecated,
       })),
     }
   })

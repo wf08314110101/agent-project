@@ -105,15 +105,25 @@ export async function runTool(name, args, cfg) {
       // 网络兜底命中带 url，以「(网络)」标注并附来源 URL（无相似度语义）
       const webN = res.hits.filter((h) => h.url).length
       const body = res.hits
-        .map((h) =>
-          h.url
-            ? `[${h.cite}] (网络) ${h.title || h.filename}\n${h.text}\n来源: ${h.url}`
-            : `[${h.cite}] (相似度 ${h.score.toFixed(3)}) ${h.filename}${h.title ? ' · ' + h.title : ''}\n${h.text}`
-        )
+        .map((h) => {
+          if (h.url) return `[${h.cite}] (网络) ${h.title || h.filename}\n${h.text}\n来源: ${h.url}`
+          // M18 时效元数据随行：版本号（>1 才显）、生效日期、废弃标注——供模型按规则 6 取舍
+          const meta = [
+            h.title ? ` · ${h.title}` : '',
+            h.docVersion > 1 ? ` · v${h.docVersion}` : '',
+            h.effectiveDate ? ` · 生效 ${h.effectiveDate}` : '',
+            h.deprecated ? ' · [已废弃]' : '',
+          ].join('')
+          return `[${h.cite}] (相似度 ${h.score.toFixed(3)}) ${h.filename}${meta}\n${h.text}`
+        })
         .join('\n\n')
       // 资料原文为不可信内容（文档/联网结果都可能藏注入载荷）：定界包装后再进上下文，
       // 系统提示规则 5 声明边界内皆为数据；引用编号 [n] 在定界符外层说明中不受影响
-      return `检索到 ${res.hits.length} 条资料（材料${res.enough ? '充足' : '有限'}${webN ? `，其中 ${webN} 条来自联网兜底` : ''}；引用编号 [n] 为全局唯一，回答中原样使用）:\n\n${fenceUntrusted(body)}`
+      // M18b：评估器判定资料间事实冲突时追加处置指令（在定界符外，属系统指令而非数据）
+      const conflictNote = res.conflict
+        ? '\n\n⚠ 注意：上述资料对同一事实存在互相矛盾的表述。回答时按版本号/生效日期取舍并注明存在旧版本说法；无法判断新旧时列出双方数值与对应引用编号，不要擅自二选一。'
+        : ''
+      return `检索到 ${res.hits.length} 条资料（材料${res.enough ? '充足' : '有限'}${webN ? `，其中 ${webN} 条来自联网兜底` : ''}；引用编号 [n] 为全局唯一，回答中原样使用）:\n\n${fenceUntrusted(body)}${conflictNote}`
     }
     case 'calculator':
       return calc(String(args.expression ?? ''))

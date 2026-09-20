@@ -3,13 +3,13 @@
 // ----------------------------------------------------------------------------
 // 用法：
 //   node scripts/evaluate.mjs                          # 全量（core+domain 双轨，检索+答案两层）
-//   node scripts/evaluate.mjs --suite core             # 只跑 core 轨（60 题）
+//   node scripts/evaluate.mjs --suite core             # 只跑 core 轨（62 题）
 //   node scripts/evaluate.mjs --suite domain           # 只跑 domain 轨（领域包业务题）
 //   node scripts/evaluate.mjs --layer retrieval        # 只跑检索层（零 LLM 成本，秒级）
 //   node scripts/evaluate.mjs --baseline evals/results/x.json   # 与基线对比
 //   node scripts/evaluate.mjs --layer retrieval --assert "recall>=0.85,mrr>=0.7,purity=1"  # 阈值门禁（CI）
 //   node scripts/evaluate.mjs --detail                 # 逐题明细（失分归因定位）
-// 数据：core 轨 evals/golden-core.jsonl（60 题）+ evals/fixtures/*；
+// 数据：core 轨 evals/golden-core.jsonl（62 题）+ evals/fixtures/*；
 //       domain 轨 backend/src/domain/api-docs/evals/golden.jsonl + 同目录 fixtures/
 //       （domain 轨要求服务以 DOMAIN_PACKS=api-docs 启动，fixture 上传到领域集合）
 // 指标：
@@ -119,6 +119,13 @@ async function ensureFixtures(suite) {
     fd.append('file', new Blob([readFileSync(join(dir, f))]), f)
     fd.append('classification', 'public') // M10 RBAC：评估语料对所有用户可读（新上传默认 private）
     if (cfg.collection) fd.append('collection', cfg.collection)
+    // M18 语料时效：可选 sidecar `<f>.json` 携带版本组元数据（docKey/docVersion/effectiveDate/deprecated）
+    const sidecar = join(dir, `${f}.json`)
+    if (existsSync(sidecar)) {
+      const meta = JSON.parse(readFileSync(sidecar, 'utf8'))
+      for (const k of ['docKey', 'effectiveDate', 'deprecated']) if (meta[k] != null && meta[k] !== '') fd.append(k, String(meta[k]))
+      if (meta.docVersion != null) fd.append('docVersion', String(meta.docVersion))
+    }
     const r = await fetch(`${BASE}/api/documents`, { method: 'POST', headers: authHeaders(), body: fd })
     if (r.ok) {
       const j = await r.json().catch(() => ({}))

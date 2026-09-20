@@ -13,7 +13,7 @@ import { ACCEPT_EXT, hashBuffer } from '../rag/parser.js'
 import { createIngestWorker, ingestBus } from '../rag/ingest.js'
 import {
   insertDoc, listDocsVisible, listDocsAll, updateDocMeta, getDoc, getDocByHash, deleteDocRow,
-  deleteGrantsByDoc, listGrantsByDoc, grantDoc, revokeGrant, getUserByName, getUserById,
+  deleteGrantsByDoc, listGrantsByDoc, grantDoc, revokeGrant, getUserByName, getUserById, getLatestDocByKey,
 } from '../store/pg.js'
 import { deleteDocPoints, setDocAclPayload } from '../rag/qdrant.js'
 import { bumpKbEpoch } from '../rag/answer-cache.js'
@@ -46,6 +46,16 @@ export default async function (app) {
       if (collection && !ALLOWED_COLLECTIONS().has(collection)) {
         return reply.code(400).send({ error: `非法集合 ${collection}（未启用的领域包）` })
       }
+      // M18 语料时效：docKey = 版本组标识（缺省文件名）+ 生效日期（自由文本，进上下文/前端展示）
+      // docVersion/deprecated 仅评估脚本 sidecar/显式声明用（正常上传由替换链路推导版本号）
+      const docKey = String(file.fields?.docKey?.value ?? '').trim() || file.filename
+      const effectiveDate = String(file.fields?.effectiveDate?.value ?? '').trim().slice(0, 32)
+      const explicitVersion = Number(file.fields?.docVersion?.value) || null
+      const deprecated = String(file.fields?.deprecated?.value ?? '').trim() === 'true'
+      // 版本化替换开关：on=全替换；auto=仅领域集合替换（core 缺省共存，零破坏）；off=不替换
+      const targetCollection = collection || config.qdrantCollection
+      const replaceOn = config.docReplaceMode === 'on' ||
+        (config.docReplaceMode === 'auto' && collection && collection !== config.qdrantCollection)
 
       const buf = await file.toBuffer() // 一次性读入内存（已有 fileSize 上限保护）
 
@@ -59,6 +69,13 @@ export default async function (app) {
         return reply.code(409).send({ error: '相同内容的文档已存在（由其他用户上传）' })
       }
 
+      // M18 版本化替换：同 docKey 已有文档且内容变化 → 新行 doc_version+1，旧行级联删除
+      // （向量/授权随删，与领域连接器同语义）；摄取中不可替换（409），防 worker 竞态
+      const prev = replaceOn ? await getLatestDocByKey(targetCollection, docKey) : null
+      if (prev && (prev.status === 'pending' || prev.status === 'processing')) {
+        return reply.code(409).send({ error: '旧版本正在摄取中，请稍后再传' })
+      }
+
       // 原件落盘，worker 从磁盘读取（接口尽快返回，不做重活）
       const docId = randomUUID()
       await fs.mkdir(config.uploadsDir, { recursive: true })
@@ -66,13 +83,29 @@ export default async function (app) {
       await fs.writeFile(filePath, buf)
 
       // 元数据入队：status=pending，挂当前用户归属，worker 会 wake 起来消费
-      await insertDoc(docId, file.filename, buf.length, hash, 0, 'pending', null, filePath, req.user.sub, classification, tags,
-        collection ? { collection } : {})
+      await insertDoc(docId, file.filename, buf.length, hash, 0, 'pending', null, filePath, req.user.sub, classification, tags, {
+        collection: collection || undefined,
+        docKey,
+        effectiveDate,
+        docVersion: explicitVersion ?? (prev ? (prev.doc_version ?? 1) + 1 : 1),
+        deprecated,
+      })
       worker.wake()
+
+      // 替换收尾：新行已落库后再删旧行（删除失败的窗口期内新旧共存，检索层版本消解兜底）
+      if (prev) {
+        if (prev.status === 'ready') await deleteDocPoints(prev.id, prev.collection).catch((e) => req.log.warn(e.message))
+        await deleteDocRow(prev.id)
+        await deleteGrantsByDoc(prev.id)
+      }
 
       // 202 Accepted：任务已受理，尚未完成
       return reply.code(202).send({
-        doc: { id: docId, filename: file.filename, size: buf.length, status: 'pending', classification, tags, collection: collection || config.qdrantCollection },
+        doc: {
+          id: docId, filename: file.filename, size: buf.length, status: 'pending', classification, tags,
+          collection: targetCollection, docKey, effectiveDate,
+          docVersion: explicitVersion ?? (prev ? (prev.doc_version ?? 1) + 1 : 1), deprecated, replaced: prev?.id ?? null,
+        },
       })
     } catch (e) {
       // 大小超限 → 413；其余 → 500

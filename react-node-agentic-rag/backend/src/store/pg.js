@@ -77,6 +77,9 @@ ALTER TABLE documents ADD COLUMN IF NOT EXISTS collection TEXT NOT NULL DEFAULT 
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_url TEXT NOT NULL DEFAULT '';
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS doc_version INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS deprecated BOOLEAN NOT NULL DEFAULT false;
+-- M18 语料时效：版本组标识（同组检索只保留最高 doc_version）+ 生效日期（ISO 日期串，展示/进上下文）
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS doc_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS effective_date TEXT NOT NULL DEFAULT '';
 -- M14 无状态鉴权：token_ver 进 JWT（改角色 +1 即刻失效旧 token）；refresh 单活哈希（旋转复用）
 ALTER TABLE users ADD COLUMN IF NOT EXISTS token_ver INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS refresh_hash TEXT;
@@ -144,14 +147,16 @@ export async function backfillDocsToUser(userId) {
 }
 
 // ---- documents：摄取队列 + 文档管理（M10 起带密级/标签/授权；M17 起带集合/语料治理字段）----
-// extra（M17 可选）：{ collection, sourceUrl, docVersion, deprecated }——手动上传不传，走 core 缺省
+// extra（M17/M18 可选）：{ collection, sourceUrl, docVersion, deprecated, docKey, effectiveDate }
+// ——手动上传不传走缺省；docKey 为版本组标识（core 缺省 filename，领域包 = sourceUrl）
 export async function insertDoc(id, filename, size, hash, chunks, status, error, path, userId, classification, tags, extra = {}) {
   await q(
     `INSERT INTO documents (id, filename, size, hash, chunks, status, error, path, user_id, classification, tags,
-                            collection, source_url, doc_version, deprecated)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15)`,
+                            collection, source_url, doc_version, deprecated, doc_key, effective_date)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15, $16, $17)`,
     [id, filename, size, hash, chunks, status, error, path, userId, classification, jsonParam(tags),
-      extra.collection || 'agentic_docs', extra.sourceUrl ?? '', extra.docVersion ?? 1, extra.deprecated ?? false]
+      extra.collection || 'agentic_docs', extra.sourceUrl ?? '', extra.docVersion ?? 1, extra.deprecated ?? false,
+      extra.docKey ?? '', extra.effectiveDate ?? '']
   )
 }
 // 可见列表：本人 ∪ public ∪ 同部门(dept) ∪ 被显式授权；admin 走 listDocsAll 全量
@@ -190,6 +195,16 @@ export async function getDocByHash(hash) {
 // M17 连接器：按溯源 URL 找同源文档（内容变更时做版本化替换）
 export async function getDocBySourceUrl(sourceUrl) {
   return (await q('SELECT * FROM documents WHERE source_url = $1 ORDER BY created_at DESC LIMIT 1', [sourceUrl])).rows[0]
+}
+// M18 版本化替换：按版本组标识取最新行（同组多版本时 doc_version 最高者；旧版本化替换的基准）
+export async function getLatestDocByKey(collection, docKey) {
+  if (!collection || !docKey) return null
+  return (
+    await q(
+      'SELECT * FROM documents WHERE collection = $1 AND doc_key = $2 ORDER BY doc_version DESC, created_at DESC LIMIT 1',
+      [collection, docKey]
+    )
+  ).rows[0] ?? null
 }
 export async function deleteDocRow(id) {
   await q('DELETE FROM documents WHERE id = $1', [id])

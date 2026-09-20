@@ -30,6 +30,7 @@ const SearchState = Annotation.Root({
   feedback: Annotation({ reducer: (_, y) => y, default: () => '' }),  // 评估反馈（缺什么），喂给改写节点
   webEligible: Annotation({ reducer: (_, y) => y, default: () => false }), // 允许联网兜底（gradeNode 写入，供路由判读）
   webTried: Annotation({ reducer: (_, y) => y, default: () => false }),    // 已联网兜底过（每轮最多一次）
+  conflict: Annotation({ reducer: (_, y) => y, default: () => false }),    // M18b：资料间事实冲突标记（gradeNode 写入）
 })
 
 // 检索：多查询并发 → 混合检索（稠密+稀疏 RRF）→ 合并去重（同块保留最高分）→ 截断 topK
@@ -114,12 +115,14 @@ async function gradeNode(state, cfg) {
   let hits = state.hits
   let enough = false
   let feedback = ''
+  let conflict = false
   if (grade && Array.isArray(grade.relevant)) {
     // 正常路径：仅保留 LLM 判定为相关的编号（编号从 1 开始，对应展示序号）
     const keep = new Set(grade.relevant.map(String))
     hits = state.hits.filter((_, i) => keep.has(String(i + 1)))
     enough = grade.enough === true
     feedback = grade.reason || ''
+    conflict = grade.conflict === true // M18b：相关资料间存在事实冲突
   } else {
     hits = state.hits // 评估失败兜底：全部保留
     enough = hits.length > 0 // 有结果就视为够用，避免误触发改写循环
@@ -136,11 +139,11 @@ async function gradeNode(state, cfg) {
   c.emit?.('step', {
     phase: 'observation',
     label: '评估',
-    content: `${cached ? '⚡ 评估（缓存命中）' : enough ? '✅ 材料充足' : '⚠️ 材料不足'}：保留 ${hits.length}/${state.hits.length}${feedback ? `（${feedback}）` : ''}`,
+    content: `${cached ? '⚡ 评估（缓存命中）' : enough ? '✅ 材料充足' : '⚠️ 材料不足'}：保留 ${hits.length}/${state.hits.length}${conflict ? '；⚠ 资料存在冲突' : ''}${feedback ? `（${feedback}）` : ''}`,
   })
   // webEligible 写入状态供路由判读（路由函数保持只读 state，不读 cfg）：
   // 指定文档范围（docId）不联网兜底——用户明确限定了资料边界，混入网络内容反而污染答案
-  return { hits, enough, feedback, webEligible: !c.docId && webSearchAvailable() }
+  return { hits, enough, feedback, conflict, webEligible: !c.docId && webSearchAvailable() }
 }
 
 // 改写：材料不足时换 2 个问法重检（返回形状由 REWRITE_SCHEMA 经 tool-call 强制）

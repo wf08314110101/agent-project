@@ -208,6 +208,10 @@ export default function ChatTab({ askDoc, onClearAsk }) {
                             ) : (
                               <span className="title">{s.title || s.filename || '无标题'}</span>
                             )}
+                            {/* M18 时效元数据随行展示：版本/生效日期/废弃 */}
+                            {!s.url && s.docVersion > 1 && <span className="owner-tag" title="文档版本">v{s.docVersion}</span>}
+                            {!s.url && s.effectiveDate && <span className="owner-tag" title="生效日期">{s.effectiveDate}</span>}
+                            {!s.url && s.deprecated && <span className="owner-tag" title="已废弃资料，仅作历史参考">已废弃</span>}
                             <span className="score">{s.url ? s.filename : s.score?.toFixed(3)}</span>
                           </li>
                         )

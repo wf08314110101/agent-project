@@ -86,10 +86,15 @@ export function createIngestWorker(log) {
       await ensureCollection({ collection }) // 幂等：集合不存在则创建（M17 领域集合同款配置）
       // M10 RBAC：密级随块写入 payload（召回前服务端过滤的依据）；ownerDept 从 users 表实时取
       const owner = await getUserById(doc.user_id)
-      // M17 语料治理字段随行写入 payload（检索命中后提示片段可声明"废弃不作为依据"）
-      const extraPayload = doc.source_url
-        ? { sourceUrl: doc.source_url, docVersion: doc.doc_version ?? 1, deprecated: doc.deprecated ?? false }
-        : {}
+      // M17/M18 语料治理随行字段：sourceUrl（领域溯源）+ docKey（版本组）+ 版本/日期/废弃
+      // docVersion/deprecated 无条件写入（版本消解与降权只看 payload，不区分领域/手动来源）
+      const extraPayload = {
+        docVersion: doc.doc_version ?? 1,
+        deprecated: doc.deprecated ?? false,
+        ...(doc.source_url ? { sourceUrl: doc.source_url } : {}),
+        ...(doc.doc_key ? { docKey: doc.doc_key } : {}),
+        ...(doc.effective_date ? { effectiveDate: doc.effective_date } : {}),
+      }
       const n = await indexChunks({
         docId: doc.id,
         filename: doc.filename,

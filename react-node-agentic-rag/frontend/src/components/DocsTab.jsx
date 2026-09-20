@@ -222,6 +222,8 @@ export default function DocsTab({ user, onAsk }) {
                     {d.filename}
                   </button>
                   {d.status === 'ready' && d.deprecated && <span className="owner-tag" title="已废弃资料，仅作历史参考">已废弃</span>}
+                  {d.docVersion > 1 && <span className="owner-tag" title="文档版本">v{d.docVersion}</span>}
+                  {d.effectiveDate && <span className="owner-tag" title="生效日期">{d.effectiveDate}</span>}
                   {!mine && <span className="owner-tag" title={`归属: ${d.owner_name ?? '他人'}${d.owner_dept ? ' · ' + d.owner_dept : ''}`}>{d.owner_name ?? '他人'}</span>}
                 </td>
                 <td>

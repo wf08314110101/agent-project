@@ -105,6 +105,36 @@ export async function indexChunks({ docId, filename, chunks, vectors, acl = {}, 
 }
 
 /**
+ * M18 语料时效后置处理（融合分之上，截断 topK 之前）：
+ * 1. 版本消解：同 docKey（版本组标识，领域包 = sourceUrl）组内旧版本块全部剔除，
+ *    最新版本块全量保留（不做块级收敛，保住同文档多块召回）；无 docKey 的点位（core 旧数据）不受影响；
+ *    docId 定向（对此文档提问）跳过消解——用户明确点名旧版文档时必须可答
+ * 2. deprecated 降权：命中融合分乘 DEPRECATED_PENALTY（降权非硬滤，用户明确问旧版仍可召回）
+ * 召回池按 prefetch 上限超取，给消解/降权后的重排留出替换空间。
+ */
+function applyFreshness(hits, limit, { resolveVersions = true } = {}) {
+  let kept = hits
+  if (resolveVersions) {
+    const maxVer = new Map() // docKey → 组内最高 docVersion
+    for (const h of hits) {
+      const gk = h.docKey || h.sourceUrl
+      if (!gk) continue
+      const v = h.docVersion ?? 1
+      if (v > (maxVer.get(gk) ?? 0)) maxVer.set(gk, v)
+    }
+    kept = hits.filter((h) => {
+      const gk = h.docKey || h.sourceUrl
+      return !gk || (h.docVersion ?? 1) >= (maxVer.get(gk) ?? 1)
+    })
+  }
+  const penalty = config.deprecatedPenalty
+  return kept
+    .map((h) => (h.deprecated && penalty > 0 && penalty < 1 ? { ...h, score: h.score * penalty } : h))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+}
+
+/**
  * 混合检索：稠密语义路 + 稀疏关键词路 → 服务端融合
  * @param {object}   p
  * @param {string}   p.text    - 查询原文（分词构建稀疏向量）
@@ -116,7 +146,7 @@ export async function indexChunks({ docId, filename, chunks, vectors, acl = {}, 
  * @param {'none'|'dense'} [p.rerank]   - dense rescore：召回池并集按稠密语义分精排
  * @param {object|null} [p.acl] - M10 RBAC 过滤：{ userId, role, dept, grants?: string[] }；
  *        null/缺省 = 不过滤（脚本/评估直连）；admin 跳过过滤；member 按密级 + 授权过滤
- * @returns {Promise<{hits: Array, mode: string}>} 融合后 topK；
+ * @returns {Promise<{hits: Array, mode: string}>} 融合 + 时效后置处理后 topK；
  *          mode = 'hybrid-rrf' | 'hybrid-dbsf' | 'hybrid-rrf+dense' | 'dense-fallback'
  */
 export async function hybridSearch({ text, vector, limit = 5, docId, acl, collection = config.qdrantCollection, fusion = config.retrieveFusion, prefetchMul = 0, rerank = 'none' }) {
@@ -153,20 +183,22 @@ export async function hybridSearch({ text, vector, limit = 5, docId, acl, collec
     { query: sparseVec, using: 'sparse', limit: k },
   ]
   // 外层 query：默认按融合算法合并；dense rescore 模式改为在「dense ∪ sparse ∪ RRF 前列」
-  // 三路并集上按稠密语义分精排——验证"字面召回池 + 语义精排"对字面强命中的歧义题的效果
+  // 三路并集上按稠密语义分精排——验证"字面召回池 + 语义精排"对字面强命中的歧义题的效果。
+  // M18：外层超取 k（=prefetch 上限）再经 applyFreshness 消解/降权后截回 limit，
+  // 给版本消解与废弃降权留出替换空间（融合层直接截 topK 会把替补挡在门外）
   const params = rerank === 'dense'
     ? {
         prefetch: [...fetch2, { prefetch: fetch2, query: { fusion: 'rrf' }, limit: k }],
         query: vector,
         using: 'dense',
-        limit,
+        limit: k,
         with_payload: true,
         ...scope,
       }
     : {
         prefetch: fetch2,
         query: { fusion },
-        limit,
+        limit: k,
         with_payload: true,
         ...scope,
       }
@@ -174,7 +206,7 @@ export async function hybridSearch({ text, vector, limit = 5, docId, acl, collec
     const { points: hits } = await qdrant.query(collection, params)
     return {
       mode: rerank === 'dense' ? 'hybrid-rrf+dense' : `hybrid-${fusion}`,
-      hits: hits.map((h) => ({ score: h.score, ...h.payload })),
+      hits: applyFreshness(hits.map((h) => ({ score: h.score, ...h.payload })), limit, { resolveVersions: !docId }),
     }
   } catch (e) {
     // 稀疏路不可用（旧集合/服务端不支持）：退化为纯稠密检索，保持可用性
@@ -182,14 +214,18 @@ export async function hybridSearch({ text, vector, limit = 5, docId, acl, collec
     const { points: hits } = await qdrant.query(collection, {
       query: vector,
       using: 'dense', // 集合为命名向量，必须显式指定（缺省默认空名会 400）
-      limit,
+      limit: k,
       with_payload: true,
       ...efParams,
       ...scope,
     })
     return {
       mode: 'dense-fallback',
-      hits: hits.filter((h) => h.score >= config.retrieveMinScore).map((h) => ({ score: h.score, ...h.payload })),
+      hits: applyFreshness(
+        hits.filter((h) => h.score >= config.retrieveMinScore).map((h) => ({ score: h.score, ...h.payload })),
+        limit,
+        { resolveVersions: !docId }
+      ),
     }
   }
 }

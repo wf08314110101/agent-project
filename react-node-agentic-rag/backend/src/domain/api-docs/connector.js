@@ -69,6 +69,7 @@ export async function syncOnce() {
       await insertDoc(docId, f.path, buf.length, hash, 0, 'pending', null, filePath, '', 'public', tags, {
         collection: pack.collection,
         sourceUrl: rawUrl,
+        docKey: rawUrl, // M18 版本组标识 = 溯源 URL（检索层版本消解 + 上传链路替换查找共用）
         docVersion,
         deprecated: deprecatedDir ? f.path.startsWith(deprecatedDir) : false,
       })

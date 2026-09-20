@@ -105,6 +105,7 @@ export default function DocsTab({ user, onAsk }) {
       const j = await r.json()
       if (!r.ok) setMsg(`失败: ${j.error}`)
       else if (j.duplicated) setMsg(`内容重复，已跳过: ${j.doc.filename}`)
+      else if (Array.isArray(j.docs)) setMsg(`zip 已拆分上传 ${j.docs.length} 个文档，后台摄取中…`) || load()
       else load() // 202 已入队，进度由 SSE 推送
     } catch (err) {
       setMsg(`失败: ${err.message}`)
@@ -163,7 +164,7 @@ export default function DocsTab({ user, onAsk }) {
           选择文件上传
           <input
             type="file"
-            accept=".md,.markdown,.txt,.pdf,.docx,.csv,.json,.html,.htm,.log"
+            accept=".md,.markdown,.txt,.pdf,.docx,.csv,.json,.html,.htm,.log,.png,.jpg,.jpeg,.webp,.zip"
             onChange={upload}
             disabled={uploading}
             hidden

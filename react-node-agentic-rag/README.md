@@ -27,6 +27,7 @@ React 5174 ──SSE── Fastify 8788 ──┬── DeepSeek (LLM, 工具调
 - **引用锚点**：检索块全局唯一编号，回答行内 [n] 可点击跳转对应来源卡片；指定文档问答（DocsTab「提问」→ 仅在该文档范围、按其所属集合定向检索）
 - **文档预览（M17）**：摄取原件保留（不再处理完即删），`GET /api/documents/:id/content` 原样回传（canReadDoc 鉴权，pdf 浏览器原生渲染，文本类 text/plain，html 不 inline 防 XSS），前端点文件名新标签页预览
 - **语料时效与冲突治理（M18）**：文档版本组 `docKey` + `docVersion/effectiveDate` 元数据贯通（上传 → payload → 检索 → 前端徽标）；同 docKey 重传自动**版本化替换**（`DOC_REPLACE_MODE=off|auto|on`，默认 core 关、领域集合开）；检索层**版本消解**（同组旧版块剔除，最新版全量保留；docId 定向旧版仍可查）+ **deprecated 降权**（`DEPRECATED_PENALTY=0.3`，降权非硬滤）；grade 增 `conflict` 冲突标记，答案按版本取舍或列明双方
+- **多格式摄取与 OCR（M19）**：parser 重构为注册表（`registerParser(ext, fn)`，与 chunker/prompt 注册同风格）。新增：①**扫描件 PDF**——pdfjs-dist 文本层字符密度判扫描（<100 字/页）→ 逐页渲染 PNG（@napi-rs/canvas）→ 视觉大模型转录（页间拼 `## 第 N 页`）；②**图片直传** png/jpg/jpeg/webp → VLM 转录（截图/表格/票据）；③**docx 升级**——mammoth convertToHtml 保标题/表格结构（标题→井号、单元格→` | `）+ 内嵌图 OCR 行内 `【图：…】`；④**zip 包**——路由层解压（yauzl）每 entry 独立入队（filename=包内路径，202 返回 `{docs:[...]}`，单文件 `{doc}` 不变），防 zip bomb（≤100 文件/100MB/不递归嵌套）+ 中文文件名解码修复（UTF-8 严格优先回退 latin1）。OCR 走 OpenAI 兼容视觉模型（`OCR_MODEL` 未配自动降级：扫描件仅文本层、图片跳过，不阻断；`OCR_BASE_URL/OCR_API_KEY` 缺省复用 LLM 配置；`OCR_MAX_PAGES=30` 成本闸）；转录提示词只约束「逐字原文」防语料失真；测试配套 `scripts/mock-vlm.mjs`（按图片尺寸返回固定转录，零外部依赖）+ `scripts/gen-m19-fixtures.mjs`（脚本生成扫描 PDF/含图 docx/表格截图）
 - **会话**：多轮上下文（超窗滚动摘要压缩，seq 断点零丢失）、消息+步骤+来源持久化回放、会话增删
 - **思维链通道**：reasoning token 走独立 SSE 事件（deepseek-reasoner 等模型自动生效），前端折叠面板展示，不与正文混流
 - **鉴权**：预置用户 + JWT 登录（scrypt 存储密码），会话/文档按用户隔离；登录接口单独限流
@@ -80,6 +81,9 @@ docker compose up -d backend frontend
 | `DOMAIN_PACKS` | 空 | 领域包单激活（M17，当前可选 `api-docs`）：主检索集合切 `rag_api_docs`、标签词表/切分策略/提示片段由包注入、上传接受 `collection=rag_api_docs`；留空 = 纯 core 零破坏 |
 | `DOC_REPLACE_MODE` | `auto` | 版本化替换（M18）：同 docKey 重传内容变化时删旧插新（version+1）。`off`=不替换新旧共存 ｜ `on`=全集合替换 ｜ `auto`=core 关、领域集合开 |
 | `DEPRECATED_PENALTY` | `0.3` | deprecated 文档命中融合分乘数（M18，降权非硬滤——明确问旧版仍可召回；1 = 不降权） |
+| `OCR_PROVIDER` / `OCR_MODEL` | `vlm` / 空 | OCR 视觉转录（M19）：`OCR_MODEL` 填视觉模型名才启用（DeepSeek 无视觉需另配 provider）；空 = 关闭（扫描件仅文本层、图片跳过，不阻断摄取） |
+| `OCR_BASE_URL` / `OCR_API_KEY` | 复用 LLM_* | 视觉模型端点（M19）常与对话模型不同 provider，可独立指定 |
+| `OCR_MAX_PAGES` / `OCR_MAX_IMAGES` | `30` / `20` | 单文档扫描页/内嵌图转录上限（M19 成本闸，超出截断并标注） |
 | `DOMAIN_SYNC_INTERVAL_MIN` / `DOMAIN_SYNC_MAX_FILES` | 0 / 40 | 连接器定时同步间隔分钟（0 = 仅手动 `npm run domain:sync`）/ 单次最多摄取文件数 |
 | `DOMAIN_SYNC_REPO` / `DOMAIN_SYNC_BRANCH` / `DOMAIN_SYNC_DIR` / `DOMAIN_SYNC_DEPRECATED_DIR` | vuejs-translations/docs-zh-cn / main / src/ / 空 | 同步源 GitHub md 仓库 / 分支 / 子目录 / 废弃区子目录（deprecated 标注） |
 | `GITHUB_TOKEN` | - | GitHub API Token（可选，防匿名 60 次/h 限流） |
@@ -91,7 +95,7 @@ docker compose up -d backend frontend
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | POST | `/api/auth/login` | 登录 → `{token}`（唯一开放的写入口，限流 10/min） |
-| POST | `/api/documents` | multipart 上传（可带 `classification`/`tags`/`collection`/`docKey`/`effectiveDate`，M18 起同 docKey 重传按 `DOC_REPLACE_MODE` 版本化替换），202 入队（`duplicated: true` 表示重复） |
+| POST | `/api/documents` | multipart 上传（可带 `classification`/`tags`/`collection`/`docKey`/`effectiveDate`，M18 起同 docKey 重传按 `DOC_REPLACE_MODE` 版本化替换；M19 起支持图片/zip——zip 路由层解压逐 entry 入队返回 `{docs:[...]}`），202 入队（`duplicated: true` 表示重复） |
 | GET | `/api/documents` | 可见集合：本人 ∪ public ∪ 同部门(dept) ∪ 被授权；admin 全量 |
 | GET | `/api/documents/:id/content` | 原文预览：原样回传字节（pdf→application/pdf，其余→text/plain）；不可读/原件缺失 404 |
 | GET | `/api/documents/events` | 摄取进度 SSE（`docs` 快照 + `doc` 单文档进度%），按可见性推送 |
@@ -160,14 +164,25 @@ npm run domain:sync                      # 手动同步 Vue 中文文档 → rag
 ## 回归与评估
 
 ```bash
+# 单元测试（node:test，39 例：ACL/MCP/parser）
+cd backend && npm test
+
+# M19 OCR 链路测试（零外部依赖：mock 视觉模型按图片尺寸返回固定转录）
+cd backend
+node scripts/gen-m19-fixtures.mjs       # 生成扫描 PDF/含图 docx/截图 fixtures（一次性）
+node scripts/mock-vlm.mjs               # mock 视觉模型 :9799
+OCR_MODEL=mock-vlm OCR_BASE_URL=http://127.0.0.1:9799/v1 npm start   # 后端挂 OCR 起
+cd .. && node scripts/evaluate.mjs --suite core --layer retrieval    # OCR 新题走摄取+检索
+# 生产换真实视觉模型配 OCR_MODEL/OCR_BASE_URL（.env 已留注释模板）
+
 # 行为红线（快，CI 每次跑）：6 类坏用例断言，失败退出码 1
 node scripts/regression.mjs          # 需先起服务；自动以 demo/demo123 登录
 AUTH_USER=alice AUTH_PASS=xxx node scripts/regression.mjs    # 换账号
 BASE_URL=http://localhost:8080 node scripts/regression.mjs   # 打容器栈
 
-# 质量水位（M6，M17 起双轨）：core 62 题 + domain 业务 12 题，各自独立基线与门禁
+# 质量水位（M6，M17 起双轨）：core 65 题 + domain 业务 12 题，各自独立基线与门禁
 node scripts/evaluate.mjs --layer retrieval            # 双轨检索层：recall@k / MRR / purity（零 LLM，秒级）
-node scripts/evaluate.mjs --suite core                 # 只跑 core 轨（冻结 62 题，内核回归门禁）
+node scripts/evaluate.mjs --suite core                 # 只跑 core 轨（冻结 65 题，内核回归门禁）
 node scripts/evaluate.mjs --suite domain               # 只跑 domain 轨（业务题，要求 DOMAIN_PACKS=api-docs 启动）
 node scripts/evaluate.mjs                              # 全量：双轨 + 答案层 mustOk / faithfulness / relevance
 node scripts/evaluate.mjs --baseline evals/results/<旧档>.json   # 与基线对比（调参前后 A/B）
@@ -175,7 +190,7 @@ node scripts/evaluate.mjs --detail                     # 逐题明细（期望�
 node scripts/evaluate.mjs --suite core --layer retrieval --assert "recall>=0.85,mrr>=0.7,purity=1"  # 阈值门禁（逐轨，CI 已挂）
 ```
 
-检索调参流程：改 `RETRIEVE_MIN_SCORE` / chunk 策略 / rerank 前跑一次存基线，改完 `--baseline` 对比数字。基线（core 轨 62 题，M18）：recall@5=0.989，MRR=0.954，purity=1（竞争文档歧义题 Q1 为 M8 定性的语料级歧义，持续存在）。注意：批量摄取后等 Qdrant 索引优化结束再评估，否则 HNSW 未收敛数字会抖。
+检索调参流程：改 `RETRIEVE_MIN_SCORE` / chunk 策略 / rerank 前跑一次存基线，改完 `--baseline` 对比数字。基线（core 轨 65 题，M19）：recall@5=0.99，MRR=0.964，purity=1（竞争文档歧义题 Q1 为 M8 定性的语料级歧义，持续存在；M19 三道 OCR 新题满分）。注意：批量摄取后等 Qdrant 索引优化结束再评估，否则 HNSW 未收敛数字会抖。
 
 M8 rerank 实验结论（`scripts/rerank-exp.mjs`，34 题 × 5 组合）：dbsf / 召回池×8 / dense 精排三种服务端策略 MRR 均在 0.971~0.985 打平（差异=1 题 rank，无显著性），**歧义题 rr=0.50 在所有策略下不变——「旧版检索基线」块语义字面双近，属语料级歧义，服务端排序无解**，后续方向是 cross-encoder 客户端 rerank 或语料治理。实验参数保留为 `RETRIEVE_FUSION` / `RETRIEVE_PREFETCH_MUL` 开关，默认维持 rrf。实验顺带修了两个潜伏 bug：dense-fallback 退化查询缺 `using:'dense'`（命名向量集合下必 400）；warn 现在带服务端 detail。
 

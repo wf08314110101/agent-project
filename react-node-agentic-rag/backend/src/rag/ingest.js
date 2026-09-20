@@ -66,7 +66,7 @@ export function createIngestWorker(log) {
     report('processing', 5)
     try {
       const buf = await fs.readFile(doc.path)
-      const text = await parseFile(doc.filename, buf)
+      const text = await parseFile(doc.filename, buf, log)
       if (!text?.trim()) throw new Error('解析结果为空') // 扫描版 PDF 等场景
 
       // M17：按文档所属集合选切分器（领域包注册的策略 / 内核通用策略）

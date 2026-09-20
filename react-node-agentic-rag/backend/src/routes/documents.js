@@ -9,7 +9,9 @@
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { ACCEPT_EXT, hashBuffer } from '../rag/parser.js'
+import yauzl from 'yauzl'
+import { ACCEPT_EXT, IMG_EXT, hashBuffer } from '../rag/parser.js'
+import { ocrEnabled } from '../rag/ocr.js'
 import { createIngestWorker, ingestBus } from '../rag/ingest.js'
 import {
   insertDoc, listDocsVisible, listDocsAll, updateDocMeta, getDoc, getDocByHash, deleteDocRow,
@@ -24,9 +26,145 @@ import { packs } from '../domain/registry.js'
 // M17 允许的目标集合：core（缺省）+ 已激活领域包集合（白名单校验，防任意集合注入）
 const ALLOWED_COLLECTIONS = () => new Set([config.qdrantCollection, ...packs.map((p) => p.collection)])
 
+// M19 zip 防护闸：条目数与解压总量上限（防 zip bomb）
+const ZIP_MAX_FILES = 100
+const ZIP_MAX_BYTES = 100 * 1024 * 1024
+
+const extOf = (name) => String(name).toLowerCase().split('.').pop()
+
 export default async function (app) {
   // 独立的临时 worker 实例：仅用于上传后 wake() 队列（不重复跑循环）
   const worker = createIngestWorker(app.log)
+
+  // M19 zip 解压：仅收白名单扩展，跳过目录/嵌套包/系统垃圾（__MACOSX 等）；
+  // 条目数与总解压量双闸，超限整包拒绝。
+  // decodeStrings=false：yauzl 对无 UTF-8 标志的包名按 CP437 解码（macOS zip 打中文包必乱码），
+  // 改为拿原始字节自行解码——UTF-8 严格模式优先，失败回退 latin1。
+  function decodeName(b) {
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(b)
+    } catch {
+      return b.toString('latin1')
+    }
+  }
+
+  function unzip(buf) {
+    return new Promise((resolve, reject) => {
+      yauzl.fromBuffer(buf, { lazyEntries: true, autoClose: true, decodeStrings: false }, (err, zip) => {
+        if (err) return reject(new Error('压缩包无法解析'))
+        const out = []
+        let total = 0
+        let overflow = false
+        zip.on('error', () => reject(new Error('压缩包无法解析')))
+        zip.on('entry', (entry) => {
+          const name = decodeName(entry.fileName)
+          const ext = extOf(name)
+          const okFile =
+            !name.endsWith('/') && !name.includes('__MACOSX') && !name.split('/').pop().startsWith('.') &&
+            ext !== 'zip' && ACCEPT_EXT.has(ext)
+          if (!okFile) return zip.readEntry()
+          if (out.length >= ZIP_MAX_FILES) {
+            overflow = true
+            zip.close()
+            return reject(new Error(`压缩包内可摄取文件超过 ${ZIP_MAX_FILES} 个上限`))
+          }
+          zip.openReadStream(entry, (e, rs) => {
+            if (e) return zip.readEntry()
+            const chunks = []
+            rs.on('data', (c) => {
+              total += c.length
+              if (total <= ZIP_MAX_BYTES) chunks.push(c)
+            })
+            rs.on('end', () => {
+              if (total > ZIP_MAX_BYTES) {
+                overflow = true
+                zip.close()
+                return reject(new Error('压缩包解压总量超过 100MB 上限'))
+              }
+              out.push({ filename: name, data: Buffer.concat(chunks) }) // filename = zip 内路径
+              zip.readEntry()
+            })
+          })
+        })
+        zip.on('end', () => (overflow ? undefined : resolve(out)))
+        zip.readEntry()
+      })
+    })
+  }
+
+  /**
+   * 单文件摄取语义（M19 抽取，单文件上传与 zip 拆分共用）：
+   * 校验 → 去重 → 版本替换判定 → 落盘 → 入队 → 收尾旧版本。
+   * 返回结构化结果而非直接 reply（zip 场景需要逐 entry 汇总）。
+   */
+  async function ingestOne({ filename, buf, fields, user, log }) {
+    const ext = extOf(filename)
+    // M19 图片必须 OCR 可用，否则解析结果必为空，提前给明确错误
+    if (IMG_EXT.has(ext) && !ocrEnabled()) return { code: 400, error: '未配置 OCR_MODEL，无法解析图片文件' }
+    // M10 RBAC：密级（默认 private，最小暴露面）+ 标签（受控枚举白名单）
+    const classification = String(fields?.classification?.value ?? 'private')
+    if (!CLASSIFICATIONS.includes(classification)) return { code: 400, error: `密级必须是 ${CLASSIFICATIONS.join('/')}` }
+    const tags = sanitizeTags(fields?.tags?.value)
+    // M17 目标集合（可选）：不传 = core；仅接受白名单内的领域集合
+    const collection = String(fields?.collection?.value ?? '').trim()
+    if (collection && !ALLOWED_COLLECTIONS().has(collection)) {
+      return { code: 400, error: `非法集合 ${collection}（未启用的领域包）` }
+    }
+    // M18 语料时效：docKey = 版本组标识（缺省文件名）+ 生效日期（自由文本，进上下文/前端展示）
+    const docKey = String(fields?.docKey?.value ?? '').trim() || filename
+    const effectiveDate = String(fields?.effectiveDate?.value ?? '').trim().slice(0, 32)
+    const explicitVersion = Number(fields?.docVersion?.value) || null
+    const deprecated = String(fields?.deprecated?.value ?? '').trim() === 'true'
+    // 版本化替换开关：on=全替换；auto=仅领域集合替换（core 缺省共存，零破坏）；off=不替换
+    const targetCollection = collection || config.qdrantCollection
+    const replaceOn = config.docReplaceMode === 'on' ||
+      (config.docReplaceMode === 'auto' && collection && collection !== config.qdrantCollection)
+
+    // 内容级幂等：同文件不重复摄取（SHA-256 相同即视为重复，改文件名也不影响）
+    const hash = hashBuffer(buf)
+    const dup = await getDocByHash(hash)
+    if (dup) {
+      if (dup.user_id === user.sub) return { duplicated: true, doc: dup }
+      return { code: 409, error: '相同内容的文档已存在（由其他用户上传）' }
+    }
+
+    // M18 版本化替换：同 docKey 已有文档且内容变化 → 新行 doc_version+1，旧行级联删除
+    const prev = replaceOn ? await getLatestDocByKey(targetCollection, docKey) : null
+    if (prev && (prev.status === 'pending' || prev.status === 'processing')) {
+      return { code: 409, error: '旧版本正在摄取中，请稍后再传' }
+    }
+
+    // 原件落盘，worker 从磁盘读取（接口尽快返回，不做重活）
+    const docId = randomUUID()
+    await fs.mkdir(config.uploadsDir, { recursive: true })
+    const filePath = path.join(config.uploadsDir, `${docId}.${ext}`)
+    await fs.writeFile(filePath, buf)
+
+    // 元数据入队：status=pending，挂当前用户归属，worker 会 wake 起来消费
+    await insertDoc(docId, filename, buf.length, hash, 0, 'pending', null, filePath, user.sub, classification, tags, {
+      collection: collection || undefined,
+      docKey,
+      effectiveDate,
+      docVersion: explicitVersion ?? (prev ? (prev.doc_version ?? 1) + 1 : 1),
+      deprecated,
+    })
+    worker.wake()
+
+    // 替换收尾：新行已落库后再删旧行（删除失败的窗口期内新旧共存，检索层版本消解兜底）
+    if (prev) {
+      if (prev.status === 'ready') await deleteDocPoints(prev.id, prev.collection).catch((e) => log.warn(e.message))
+      await deleteDocRow(prev.id)
+      await deleteGrantsByDoc(prev.id)
+    }
+
+    return {
+      doc: {
+        id: docId, filename, size: buf.length, status: 'pending', classification, tags,
+        collection: targetCollection, docKey, effectiveDate,
+        docVersion: explicitVersion ?? (prev ? (prev.doc_version ?? 1) + 1 : 1), deprecated, replaced: prev?.id ?? null,
+      },
+    }
+  }
 
   // M3 异步摄取：校验+去重+落盘入队即返回 202，解析/切块/嵌入由 worker 后台做，前端轮询状态
   app.post('/api/documents', async (req, reply) => {
@@ -35,83 +173,34 @@ export default async function (app) {
       const file = await req.file({ limits: { fileSize: config.uploadMaxMb * 1024 * 1024 } })
       if (!file) return reply.code(400).send({ error: '缺少文件' })
       // 扩展名白名单校验（parser.js 中同名单，双保险）
-      const ext = file.filename.toLowerCase().split('.').pop()
+      const ext = extOf(file.filename)
       if (!ACCEPT_EXT.has(ext)) return reply.code(400).send({ error: `不支持的类型 .${ext}` })
-      // M10 RBAC：密级（默认 private，最小暴露面）+ 标签（受控枚举白名单）
-      const classification = String(file.fields?.classification?.value ?? 'private')
-      if (!CLASSIFICATIONS.includes(classification)) return reply.code(400).send({ error: `密级必须是 ${CLASSIFICATIONS.join('/')}` })
-      const tags = sanitizeTags(file.fields?.tags?.value)
-      // M17 目标集合（可选）：不传 = core；仅接受白名单内的领域集合
-      const collection = String(file.fields?.collection?.value ?? '').trim()
-      if (collection && !ALLOWED_COLLECTIONS().has(collection)) {
-        return reply.code(400).send({ error: `非法集合 ${collection}（未启用的领域包）` })
-      }
-      // M18 语料时效：docKey = 版本组标识（缺省文件名）+ 生效日期（自由文本，进上下文/前端展示）
-      // docVersion/deprecated 仅评估脚本 sidecar/显式声明用（正常上传由替换链路推导版本号）
-      const docKey = String(file.fields?.docKey?.value ?? '').trim() || file.filename
-      const effectiveDate = String(file.fields?.effectiveDate?.value ?? '').trim().slice(0, 32)
-      const explicitVersion = Number(file.fields?.docVersion?.value) || null
-      const deprecated = String(file.fields?.deprecated?.value ?? '').trim() === 'true'
-      // 版本化替换开关：on=全替换；auto=仅领域集合替换（core 缺省共存，零破坏）；off=不替换
-      const targetCollection = collection || config.qdrantCollection
-      const replaceOn = config.docReplaceMode === 'on' ||
-        (config.docReplaceMode === 'auto' && collection && collection !== config.qdrantCollection)
-
       const buf = await file.toBuffer() // 一次性读入内存（已有 fileSize 上限保护）
 
-      // 内容级幂等：同文件不重复摄取（SHA-256 相同即视为重复，改文件名也不影响）
-      // 归属语义：hash 全库唯一（知识库是共享池，同一内容只嵌一份向量）；
-      // 本人重复上传 → duplicated 跳过；他人已传 → 409 提示，不重复占存储
-      const hash = hashBuffer(buf)
-      const dup = await getDocByHash(hash)
-      if (dup) {
-        if (dup.user_id === req.user.sub) return reply.send({ duplicated: true, doc: dup })
-        return reply.code(409).send({ error: '相同内容的文档已存在（由其他用户上传）' })
+      // M19 zip：路由层解压为多个独立文档（每 entry 一个 docId），表单字段作用于包内全部文件；
+      // 响应为 {docs:[...]} 数组（单文件仍为 {doc}，前端兼容）
+      if (ext === 'zip') {
+        const entries = await unzip(buf)
+        if (!entries.length) return reply.code(400).send({ error: '压缩包内没有可摄取的文件' })
+        const docs = []
+        for (const en of entries) {
+          const r = await ingestOne({ filename: en.filename, buf: en.data, fields: file.fields, user: req.user, log: req.log })
+          docs.push({ filename: en.filename, ...(r.error ? { error: r.error } : r.duplicated ? { duplicated: true, doc: r.doc } : { doc: r.doc }) })
+        }
+        return reply.code(202).send({ docs })
       }
 
-      // M18 版本化替换：同 docKey 已有文档且内容变化 → 新行 doc_version+1，旧行级联删除
-      // （向量/授权随删，与领域连接器同语义）；摄取中不可替换（409），防 worker 竞态
-      const prev = replaceOn ? await getLatestDocByKey(targetCollection, docKey) : null
-      if (prev && (prev.status === 'pending' || prev.status === 'processing')) {
-        return reply.code(409).send({ error: '旧版本正在摄取中，请稍后再传' })
-      }
-
-      // 原件落盘，worker 从磁盘读取（接口尽快返回，不做重活）
-      const docId = randomUUID()
-      await fs.mkdir(config.uploadsDir, { recursive: true })
-      const filePath = path.join(config.uploadsDir, `${docId}.${ext}`)
-      await fs.writeFile(filePath, buf)
-
-      // 元数据入队：status=pending，挂当前用户归属，worker 会 wake 起来消费
-      await insertDoc(docId, file.filename, buf.length, hash, 0, 'pending', null, filePath, req.user.sub, classification, tags, {
-        collection: collection || undefined,
-        docKey,
-        effectiveDate,
-        docVersion: explicitVersion ?? (prev ? (prev.doc_version ?? 1) + 1 : 1),
-        deprecated,
-      })
-      worker.wake()
-
-      // 替换收尾：新行已落库后再删旧行（删除失败的窗口期内新旧共存，检索层版本消解兜底）
-      if (prev) {
-        if (prev.status === 'ready') await deleteDocPoints(prev.id, prev.collection).catch((e) => req.log.warn(e.message))
-        await deleteDocRow(prev.id)
-        await deleteGrantsByDoc(prev.id)
-      }
-
+      const r = await ingestOne({ filename: file.filename, buf, fields: file.fields, user: req.user, log: req.log })
+      if (r.error) return reply.code(r.code).send({ error: r.error })
+      if (r.duplicated) return reply.send({ duplicated: true, doc: r.doc })
       // 202 Accepted：任务已受理，尚未完成
-      return reply.code(202).send({
-        doc: {
-          id: docId, filename: file.filename, size: buf.length, status: 'pending', classification, tags,
-          collection: targetCollection, docKey, effectiveDate,
-          docVersion: explicitVersion ?? (prev ? (prev.doc_version ?? 1) + 1 : 1), deprecated, replaced: prev?.id ?? null,
-        },
-      })
+      return reply.code(202).send({ doc: r.doc })
     } catch (e) {
-      // 大小超限 → 413；其余 → 500
+      // 大小超限 → 413；zip 防护闸 → 400；其余 → 500
       if (/RequestFileTooLargeError|file size limit/i.test(String(e))) {
         return reply.code(413).send({ error: `文件超过 ${config.uploadMaxMb}MB 限制` })
       }
+      if (/压缩包|解压总量/.test(e.message)) return reply.code(400).send({ error: e.message })
       req.log.error(e)
       return reply.code(500).send({ error: e.message })
     }

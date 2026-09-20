@@ -9,7 +9,7 @@
 //   node scripts/evaluate.mjs --baseline evals/results/x.json   # 与基线对比
 //   node scripts/evaluate.mjs --layer retrieval --assert "recall>=0.85,mrr>=0.7,purity=1"  # 阈值门禁（CI）
 //   node scripts/evaluate.mjs --detail                 # 逐题明细（失分归因定位）
-// 数据：core 轨 evals/golden-core.jsonl（62 题）+ evals/fixtures/*；
+// 数据：core 轨 evals/golden-core.jsonl（65 题）+ evals/fixtures/*；
 //       domain 轨 backend/src/domain/api-docs/evals/golden.jsonl + 同目录 fixtures/
 //       （domain 轨要求服务以 DOMAIN_PACKS=api-docs 启动，fixture 上传到领域集合）
 // 指标：
@@ -112,7 +112,8 @@ async function chat({ question, sessionId, topK = TOPK }) {
 async function ensureFixtures(suite) {
   const cfg = SUITE_CFG[suite]
   const dir = join(ROOT, cfg.fixtures)
-  const files = readdirSync(dir).filter((f) => /\.(md|txt)$/.test(f))
+  // M19 起支持多格式 fixture（扫描 PDF/含图 docx/图片，OCR 产物进检索语料）
+  const files = readdirSync(dir).filter((f) => /\.(md|txt|pdf|docx|png|jpg|jpeg|webp)$/.test(f))
   console.log(`fixture[${suite}]: ${files.length} 个文档 → ${cfg.collection || 'core 集合'}`)
   for (const f of files) {
     const fd = new FormData()

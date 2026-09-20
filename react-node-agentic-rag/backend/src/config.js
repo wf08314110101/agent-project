@@ -50,6 +50,17 @@ export const config = {
     model: env('LLM_MODEL', 'deepseek-chat'),                    // 对话模型名
   },
 
+  // ---- M19 OCR（视觉大模型转录）：扫描件 PDF / 独立图片 / docx 内嵌图 ----
+  // OCR_MODEL 未配置 = 关闭 OCR：扫描 PDF 仅取文本层、图片/docx 图跳过（不阻断摄取）
+  ocr: {
+    provider: env('OCR_PROVIDER', 'vlm'), // vlm（OpenAI 兼容视觉模型）| off
+    model: env('OCR_MODEL', ''),          // 视觉模型名（如 qwen2.5-vl-72b-instruct）
+    baseUrl: env('OCR_BASE_URL', ''),     // 空 = 复用 LLM_BASE_URL（视觉模型常在另一家 provider，可独立指定）
+    apiKey: env('OCR_API_KEY', ''),       // 空 = 复用 LLM_API_KEY
+    maxPages: int('OCR_MAX_PAGES', 30),   // 扫描 PDF 单文档转录页数上限（成本闸，超出截断并标注）
+    maxImages: int('OCR_MAX_IMAGES', 20), // docx 单文档内嵌图转录上限
+  },
+
   // ---- 嵌入模型：local = 本地 CPU transformers.js；openai = OpenAI 兼容 /embeddings 端点（硅基流动等）----
   // 切换 provider 时 EMBED_DIM 必须与新模型输出维度一致（Qdrant 集合维度建后不可改，需重建集合）
   embed: {

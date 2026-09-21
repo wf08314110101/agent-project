@@ -90,11 +90,15 @@ async function consumeSSE(res, onEvent) {
 }
 
 // SSE 流式问答：POST + ReadableStream 手动解析（EventSource 不支持 POST/自定义头）
-export async function streamChat({ question, topK, sessionId, docId, signal, onEvent }) {
+export async function streamChat({ question, topK, sessionId, docId, stagingId, signal, onEvent }) {
   const res = await apiFetch('/api/chat', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ question, topK, sessionId, ...(docId ? { docId } : {}) }),
+    body: JSON.stringify({
+      question, topK, sessionId,
+      ...(docId ? { docId } : {}),
+      ...(stagingId ? { stagingId } : {}), // M20 暂存附件
+    }),
     signal,
   })
   if (!res.ok) {
@@ -102,6 +106,24 @@ export async function streamChat({ question, topK, sessionId, docId, signal, onE
     throw new Error(j.error || `HTTP ${res.status}`)
   }
   await consumeSSE(res, onEvent)
+}
+
+// M20 对话内暂存上传：拿 stagingId 随消息发送（批准后才真正入库）
+export async function stageUpload(file) {
+  const fd = new FormData()
+  fd.append('file', file)
+  const res = await apiFetch('/api/staging', { method: 'POST', body: fd })
+  const j = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`)
+  return j // { stagingId, filename, size }
+}
+
+// M20 写审批决定：action = 'confirm' | 'reject'
+export async function decideApproval(id, action) {
+  const res = await apiFetch(`/api/approvals/${id}/${action}`, { method: 'POST' })
+  const j = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(j.error || `HTTP ${res.status}`)
+  return j
 }
 
 // 文档摄取进度流：GET SSE，docs=全量快照 / doc=单文档状态变化（替代轮询）

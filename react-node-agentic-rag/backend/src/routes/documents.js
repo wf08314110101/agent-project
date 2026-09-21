@@ -6,36 +6,25 @@
 // 删除是同步的：先删原件与向量，最后删元数据行，保证向量与元数据一致。
 // ============================================================================
 
-import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
-import path from 'node:path'
 import yauzl from 'yauzl'
-import { ACCEPT_EXT, IMG_EXT, hashBuffer } from '../rag/parser.js'
-import { ocrEnabled } from '../rag/ocr.js'
-import { createIngestWorker, ingestBus } from '../rag/ingest.js'
+import { ACCEPT_EXT } from '../rag/parser.js'
+import { ingestBus } from '../rag/ingest.js'
+import { ingestOne, extOf } from '../rag/ingest-one.js' // M20：摄取单文件语义上移共享模块
 import {
-  insertDoc, listDocsVisible, listDocsAll, updateDocMeta, getDoc, getDocByHash, deleteDocRow,
-  deleteGrantsByDoc, listGrantsByDoc, grantDoc, revokeGrant, getUserByName, getUserById, getLatestDocByKey,
+  listDocsVisible, listDocsAll, updateDocMeta, getDoc, deleteDocRow,
+  deleteGrantsByDoc, listGrantsByDoc, grantDoc, revokeGrant, getUserByName, getUserById,
 } from '../store/pg.js'
 import { deleteDocPoints, setDocAclPayload } from '../rag/qdrant.js'
 import { bumpKbEpoch } from '../rag/answer-cache.js'
 import { canReadDoc, CLASSIFICATIONS, sanitizeTags } from '../acl.js'
 import { config } from '../config.js'
-import { packs } from '../domain/registry.js'
-
-// M17 允许的目标集合：core（缺省）+ 已激活领域包集合（白名单校验，防任意集合注入）
-const ALLOWED_COLLECTIONS = () => new Set([config.qdrantCollection, ...packs.map((p) => p.collection)])
 
 // M19 zip 防护闸：条目数与解压总量上限（防 zip bomb）
 const ZIP_MAX_FILES = 100
 const ZIP_MAX_BYTES = 100 * 1024 * 1024
 
-const extOf = (name) => String(name).toLowerCase().split('.').pop()
-
 export default async function (app) {
-  // 独立的临时 worker 实例：仅用于上传后 wake() 队列（不重复跑循环）
-  const worker = createIngestWorker(app.log)
-
   // M19 zip 解压：仅收白名单扩展，跳过目录/嵌套包/系统垃圾（__MACOSX 等）；
   // 条目数与总解压量双闸，超限整包拒绝。
   // decodeStrings=false：yauzl 对无 UTF-8 标志的包名按 CP437 解码（macOS zip 打中文包必乱码），
@@ -93,78 +82,9 @@ export default async function (app) {
   }
 
   /**
-   * 单文件摄取语义（M19 抽取，单文件上传与 zip 拆分共用）：
-   * 校验 → 去重 → 版本替换判定 → 落盘 → 入队 → 收尾旧版本。
-   * 返回结构化结果而非直接 reply（zip 场景需要逐 entry 汇总）。
+   * 单文件摄取语义已上移 [rag/ingest-one.js](../src/rag/ingest-one.js)（M20）：
+   * 上传路由与写工具审批执行共用同一套校验/去重/版本替换管线。
    */
-  async function ingestOne({ filename, buf, fields, user, log }) {
-    const ext = extOf(filename)
-    // M19 图片必须 OCR 可用，否则解析结果必为空，提前给明确错误
-    if (IMG_EXT.has(ext) && !ocrEnabled()) return { code: 400, error: '未配置 OCR_MODEL，无法解析图片文件' }
-    // M10 RBAC：密级（默认 private，最小暴露面）+ 标签（受控枚举白名单）
-    const classification = String(fields?.classification?.value ?? 'private')
-    if (!CLASSIFICATIONS.includes(classification)) return { code: 400, error: `密级必须是 ${CLASSIFICATIONS.join('/')}` }
-    const tags = sanitizeTags(fields?.tags?.value)
-    // M17 目标集合（可选）：不传 = core；仅接受白名单内的领域集合
-    const collection = String(fields?.collection?.value ?? '').trim()
-    if (collection && !ALLOWED_COLLECTIONS().has(collection)) {
-      return { code: 400, error: `非法集合 ${collection}（未启用的领域包）` }
-    }
-    // M18 语料时效：docKey = 版本组标识（缺省文件名）+ 生效日期（自由文本，进上下文/前端展示）
-    const docKey = String(fields?.docKey?.value ?? '').trim() || filename
-    const effectiveDate = String(fields?.effectiveDate?.value ?? '').trim().slice(0, 32)
-    const explicitVersion = Number(fields?.docVersion?.value) || null
-    const deprecated = String(fields?.deprecated?.value ?? '').trim() === 'true'
-    // 版本化替换开关：on=全替换；auto=仅领域集合替换（core 缺省共存，零破坏）；off=不替换
-    const targetCollection = collection || config.qdrantCollection
-    const replaceOn = config.docReplaceMode === 'on' ||
-      (config.docReplaceMode === 'auto' && collection && collection !== config.qdrantCollection)
-
-    // 内容级幂等：同文件不重复摄取（SHA-256 相同即视为重复，改文件名也不影响）
-    const hash = hashBuffer(buf)
-    const dup = await getDocByHash(hash)
-    if (dup) {
-      if (dup.user_id === user.sub) return { duplicated: true, doc: dup }
-      return { code: 409, error: '相同内容的文档已存在（由其他用户上传）' }
-    }
-
-    // M18 版本化替换：同 docKey 已有文档且内容变化 → 新行 doc_version+1，旧行级联删除
-    const prev = replaceOn ? await getLatestDocByKey(targetCollection, docKey) : null
-    if (prev && (prev.status === 'pending' || prev.status === 'processing')) {
-      return { code: 409, error: '旧版本正在摄取中，请稍后再传' }
-    }
-
-    // 原件落盘，worker 从磁盘读取（接口尽快返回，不做重活）
-    const docId = randomUUID()
-    await fs.mkdir(config.uploadsDir, { recursive: true })
-    const filePath = path.join(config.uploadsDir, `${docId}.${ext}`)
-    await fs.writeFile(filePath, buf)
-
-    // 元数据入队：status=pending，挂当前用户归属，worker 会 wake 起来消费
-    await insertDoc(docId, filename, buf.length, hash, 0, 'pending', null, filePath, user.sub, classification, tags, {
-      collection: collection || undefined,
-      docKey,
-      effectiveDate,
-      docVersion: explicitVersion ?? (prev ? (prev.doc_version ?? 1) + 1 : 1),
-      deprecated,
-    })
-    worker.wake()
-
-    // 替换收尾：新行已落库后再删旧行（删除失败的窗口期内新旧共存，检索层版本消解兜底）
-    if (prev) {
-      if (prev.status === 'ready') await deleteDocPoints(prev.id, prev.collection).catch((e) => log.warn(e.message))
-      await deleteDocRow(prev.id)
-      await deleteGrantsByDoc(prev.id)
-    }
-
-    return {
-      doc: {
-        id: docId, filename, size: buf.length, status: 'pending', classification, tags,
-        collection: targetCollection, docKey, effectiveDate,
-        docVersion: explicitVersion ?? (prev ? (prev.doc_version ?? 1) + 1 : 1), deprecated, replaced: prev?.id ?? null,
-      },
-    }
-  }
 
   // M3 异步摄取：校验+去重+落盘入队即返回 202，解析/切块/嵌入由 worker 后台做，前端轮询状态
   app.post('/api/documents', async (req, reply) => {

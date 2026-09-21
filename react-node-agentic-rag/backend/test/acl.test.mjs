@@ -23,7 +23,7 @@ mock.module('../src/store/pg.js', {
   },
 })
 
-const { canReadDoc, aclFor, sanitizeTags, CLASSIFICATIONS, getTagWhitelist, setTagWhitelist } = await import('../src/acl.js')
+const { canReadDoc, aclFor, sanitizeTags, CLASSIFICATIONS, getTagWhitelist, setTagWhitelist, canWriteDoc } = await import('../src/acl.js')
 
 const U = {
   admin: { sub: 'a1', role: 'admin', dept: '研发' },
@@ -102,6 +102,30 @@ describe('canReadDoc', () => {
   it('null 输入返回 false', async () => {
     assert.equal(await canReadDoc(null, D()), false)
     assert.equal(await canReadDoc(U.memberR, null), false)
+  })
+})
+
+// ============================================================================
+// canWriteDoc（M20）：写权限判定单点
+// ============================================================================
+describe('canWriteDoc', () => {
+  it('doc=null（新建）任何登录用户可提交（成为 owner）', () => {
+    assert.equal(canWriteDoc(U.memberR, null), true)
+    assert.equal(canWriteDoc(U.admin, null), true)
+  })
+  it('owner 可替换自己的文档', () => {
+    assert.equal(canWriteDoc(U.memberR, D({ user_id: 'm1' })), true)
+  })
+  it('admin 可替换他人文档', () => {
+    assert.equal(canWriteDoc(U.admin, D({ user_id: 'm1' })), true)
+  })
+  it('member 不可替换他人文档', () => {
+    assert.equal(canWriteDoc(U.memberS, D({ user_id: 'm1' })), false)
+    assert.equal(canWriteDoc(U.memberR2, D({ user_id: 'm1' })), false)
+  })
+  it('无用户拒绝', () => {
+    assert.equal(canWriteDoc(null, null), false)
+    assert.equal(canWriteDoc(null, D()), false)
   })
 })
 

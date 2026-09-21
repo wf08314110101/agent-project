@@ -165,4 +165,12 @@ export const config = {
   // ---- M18 语料时效治理：版本化替换 + 检索层废弃降权 ----
   docReplaceMode: env('DOC_REPLACE_MODE', 'auto'),   // off=不替换（新旧共存）| on=全替换 | auto=core 关、领域集合开
   deprecatedPenalty: Number(env('DEPRECATED_PENALTY', '0.3')), // deprecated 命中融合分乘数（1 = 不降权；降权非硬滤，保住"明确问旧版"的召回）
+
+  // ---- M20 写能力（Agent 写工具 + 幂等/审批/审计三件套）----
+  // enabled=false 时写工具不进工具表（M16「工具全只读=无破坏面」前提不被破坏）
+  write: {
+    enabled: env('WRITE_TOOLS', 'false') === 'true',          // true=暴露 submit_document（需人工审批）
+    autoApprove: env('WRITE_AUTO_APPROVE', 'false') === 'true', // true=跳过人工确认直接执行（仅测试/演示）
+    approvalTimeoutSec: int('APPROVAL_TIMEOUT_SEC', 900),     // 审批单有效期（秒），超时过期；暂存文件同 TTL 清理
+  },
 }

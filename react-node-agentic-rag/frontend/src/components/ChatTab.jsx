@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { streamChat, fetchSessions, fetchMessages, removeSession } from '../api.js'
+import { streamChat, fetchSessions, fetchMessages, removeSession, stageUpload, decideApproval } from '../api.js'
 
-const PHASE_ICON = { action: '🔧', observation: '👁️', thought: '💭' }
+const PHASE_ICON = { action: '🔧', observation: '👁️', thought: '💭', approval: '✍️' }
 
 // 正文引用渲染：把 [n] 拆成可点击徽标，点击高亮并滚动到对应来源卡片
 // 无编号文本原样返回；n 超出来源数（模型编造/历史消息旧编号）时按纯文本处理
@@ -35,8 +35,10 @@ export default function ChatTab({ askDoc, onClearAsk }) {
   const [input, setInput] = useState('')
   const [topK, setTopK] = useState(5)
   const [busy, setBusy] = useState(false)
+  const [staging, setStaging] = useState(null) // M20 暂存附件 {stagingId, filename}
   const abortRef = useRef(null)
   const boxRef = useRef(null)
+  const fileRef = useRef(null)
 
   useEffect(() => {
     fetchSessions().then(setSessions).catch(() => {})
@@ -86,10 +88,30 @@ export default function ChatTab({ askDoc, onClearAsk }) {
     setMessages([])
   }
 
-  async function send() {
-    const q = input.trim()
+  // M20 审批决定：批准→执行写→自动发续答；拒绝→告知 agent 不写入
+  async function decide(ap, action) {
+    if (busy) return
+    patchLast((x) => ({ ...x, approval: { ...x.approval, status: 'deciding' } }))
+    try {
+      const r = await decideApproval(ap.approvalId, action)
+      const st = action === 'reject' ? 'rejected' : 'executed'
+      patchLast((x) => ({ ...x, approval: { ...x.approval, status: st, error: r.error ?? null, doc: r.result?.doc ?? null } }))
+      send(
+        action === 'reject'
+          ? `已拒绝该写入操作（审批单 ${ap.approvalId}），请勿写入并向用户确认。`
+          : `写操作审批单 ${ap.approvalId} 已批准并执行：文档「${ap.filename}」已入库。请检索确认该文档已可查到，并向用户报告入库结果。`
+      )
+    } catch (e) {
+      patchLast((x) => ({ ...x, approval: { ...x.approval, status: 'pending', error: e.message } }))
+    }
+  }
+
+  async function send(forced) {
+    const q = (typeof forced === 'string' ? forced : input).trim()
     if (!q || busy) return
     setInput('')
+    const sid = staging?.stagingId ?? null
+    setStaging(null) // stagingId 一次性消费：随本次消息交给后端校验
     setBusy(true)
     setMessages((m) => [
       ...m,
@@ -106,6 +128,7 @@ export default function ChatTab({ askDoc, onClearAsk }) {
         topK,
         sessionId,
         docId: askDoc?.id, // 指定文档问答：空 = 全库检索
+        stagingId: sid, // M20 暂存附件（可选），后端校验归属后注入附件说明
         signal: ctrl.signal,
         onEvent: (ev, d) => {
           if (ev === 'sources') patchLast((x) => ({ ...x, sources: d.sources }))
@@ -115,6 +138,10 @@ export default function ChatTab({ askDoc, onClearAsk }) {
             patchLast((x) => ({ ...x, reasoning: (x.reasoning ?? '') + d.text }))
           } else if (ev === 'delta') {
             patchLast((x) => ({ ...x, content: x.content + d.text }))
+            scroll()
+          } else if (ev === 'approval_required') {
+            // M20 写审批卡片：批准前写入不执行
+            patchLast((x) => ({ ...x, approval: { ...d, status: 'pending' } }))
             scroll()
           } else if (ev === 'usage') patchLast((x) => ({ ...x, usage: d }))
           else if (ev === 'done') {
@@ -133,6 +160,18 @@ export default function ChatTab({ askDoc, onClearAsk }) {
       setBusy(false)
       abortRef.current = null
       patchLast((x) => (x.status === 'streaming' ? { ...x, status: 'done' } : x))
+    }
+  }
+
+  // M20 对话内上传：先暂存拿 stagingId，随下一条消息发送（批准后才真正入库）
+  async function onPick(e) {
+    const f = e.target.files?.[0]
+    e.target.value = ''
+    if (!f) return
+    try {
+      setStaging(await stageUpload(f))
+    } catch (err) {
+      patchLast((x) => ({ ...x, status: 'error', content: `${x.content}\n[上传失败] ${err.message}` }))
     }
   }
 
@@ -219,6 +258,36 @@ export default function ChatTab({ askDoc, onClearAsk }) {
                     </ol>
                   </div>
                 )}
+                {/* M20 写审批卡片：批准前写入不执行 */}
+                {m.role === 'assistant' && m.approval && (
+                  <div className={`approval ${m.approval.status}`}>
+                    <div className="ap-head">✍️ {m.approval.summary || `提交文档 ${m.approval.filename}`}</div>
+                    <div className="ap-meta">
+                      {m.approval.filename}
+                      {m.approval.collection ? ` · 集合 ${m.approval.collection}` : ' · 核心库'}
+                      {m.approval.docKey && m.approval.docKey !== m.approval.filename ? ` · 版本组 ${m.approval.docKey}` : ''}
+                      {m.approval.classification && ` · ${m.approval.classification}`}
+                    </div>
+                    {m.approval.status === 'pending' && (
+                      <div className="ap-actions">
+                        <button className="ap-ok" disabled={busy} onClick={() => decide(m.approval, 'confirm')}>
+                          批准入库
+                        </button>
+                        <button className="ap-no" disabled={busy} onClick={() => decide(m.approval, 'reject')}>
+                          拒绝
+                        </button>
+                      </div>
+                    )}
+                    {m.approval.status === 'deciding' && <div className="ap-status">处理中…</div>}
+                    {m.approval.status === 'executed' && (
+                      <div className="ap-status ok">
+                        ✓ 已入库（docId {m.approval.doc?.id}{m.approval.doc?.docVersion > 1 ? ` · v${m.approval.doc.docVersion}` : ''}）
+                      </div>
+                    )}
+                    {m.approval.status === 'rejected' && <div className="ap-status">✗ 已拒绝</div>}
+                    {m.approval.error && <div className="ap-status err">{m.approval.error}</div>}
+                  </div>
+                )}
                 <div className="content">
                   {m.role === 'assistant'
                     ? renderContent(m.content || (m.status === 'streaming' ? '…' : ''), i, cites)
@@ -243,6 +312,16 @@ export default function ChatTab({ askDoc, onClearAsk }) {
               <button onClick={onClearAsk}>×</button>
             </span>
           )}
+          {staging && (
+            <span className="ask-doc stage" title="已暂存，随下一条消息发送（写入需审批）">
+              📎 {staging.filename}
+              <button onClick={() => setStaging(null)}>×</button>
+            </span>
+          )}
+          <input ref={fileRef} type="file" hidden onChange={onPick} />
+          <button className="attach" title="上传附件（写入知识库需审批）" disabled={busy} onClick={() => fileRef.current?.click()}>
+            📎
+          </button>
           <label className="topk">
             top-k
             <input

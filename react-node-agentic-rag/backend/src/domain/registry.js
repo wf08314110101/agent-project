@@ -30,6 +30,8 @@ const enabled = new Set(
 export const packs = ALL_PACKS.filter((p) => enabled.has(p.name))
 // 激活集合：主检索集合随激活包切换（问答/检索/MCP 的知识源）；空 = core 集合
 export const activeCollection = () => packs[0]?.collection ?? config.qdrantCollection
+// M20 可写目标集合白名单：core + 已激活领域包集合（上传/写工具共用，防任意集合注入）
+export const allowedCollections = () => new Set([config.qdrantCollection, ...packs.map((p) => p.collection)])
 
 export const domainToolDefs = packs.flatMap((p) => p.toolDefs ?? [])
 export const domainHandlers = Object.fromEntries(packs.flatMap((p) => Object.entries(p.handlers ?? {})))

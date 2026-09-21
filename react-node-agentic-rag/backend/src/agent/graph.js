@@ -13,6 +13,7 @@ import { StateGraph, Annotation, START, END } from '@langchain/langgraph'
 import { chatStream } from '../llm.js'
 import { config } from '../config.js'
 import { toolDefs, runTool, validateToolArgs } from './tools.js'
+import { WRITE_TOOLS, interceptWrite } from './write.js'
 import { FORCE_ANSWER, buildAgentSystem } from './prompts.js'
 import { leaksSystemPrompt } from './injection.js'
 import { otelSpan } from '../obs/otel.js'
@@ -160,6 +161,21 @@ async function toolsNode(state, cfg) {
         })
         return obs + REUSE_HINT
       }
+      // M20 写工具拦截：不进 execOne（不真正执行），落审批单后以「等待审批」Observation 收尾
+      if (WRITE_TOOLS.has(tc.function.name)) {
+        const wSpan = otelSpan(`tool.${tc.function.name}`, 'TOOL', { 'input.value': tc.function.arguments })
+        const p = interceptWrite({
+          name: tc.function.name, args, user: c.user, sessionId: c.sessionId,
+          emit: c.emit, span: wSpan, log: c.log,
+        })
+          .catch((e) => `写操作发起失败: ${e.message}`)
+          .then((obs) => {
+            wSpan.end(String(obs).slice(0, 800))
+            return obs
+          })
+        inflight.set(cacheKey, p)
+        return p
+      }
       const p = execOne(tc, args, cacheKey)
       inflight.set(cacheKey, p)
       return p
@@ -191,8 +207,10 @@ export const agentGraph = new StateGraph(AgentState)
  * @param {string} [docId] - 指定文档检索范围（「对此文档提问」），空则检索全库
  * @param {string} [collection] - M17 定向集合：文档级 QA 按文档所属集合检索；空则用 activeCollection()
  * @param {object|null} [acl] - M10 RBAC 检索过滤（aclFor 产物），贯穿到 search_kb 子图
+ * @param {object} [user]   - M20 写工具的执行身份（req.user：sub/username/role/dept）
+ * @param {string} [sessionId] - M20 写操作关联的会话（审批单溯源）
  */
-export function runAgent({ messages, topK = 5, signal, emit, usageAcc, docId, collection, acl }) {
+export function runAgent({ messages, topK = 5, signal, emit, usageAcc, docId, collection, acl, user, sessionId }) {
   return agentGraph.invoke(
     { messages, stepCount: 0 },
     {
@@ -205,6 +223,8 @@ export function runAgent({ messages, topK = 5, signal, emit, usageAcc, docId, co
         collection: collection || undefined, // 贯穿到 retrieveNode：文档级 QA 定向所属集合
         acl: acl ?? undefined,    // 贯穿到 retrieveNode：密级/归属/授权的服务端过滤
         actionLog: new Map(), // 重复 Action 检测缓存（每次 invoke 独立，跨请求不共享）
+        user,       // M20 写工具身份
+        sessionId,  // M20 写操作溯源
       },
     }
   )

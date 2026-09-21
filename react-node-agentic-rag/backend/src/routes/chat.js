@@ -16,11 +16,12 @@ import { buildAgentSystem } from '../agent/prompts.js'
 import { scanInjection } from '../agent/injection.js'
 import { compressMemory, memoryFallback } from '../agent/memory.js'
 import { rootSpan, runInCtx, flushObs } from '../obs/otel.js'
-import { insertSession, getSession, insertMsg, getMemory, listAfterSeq, getDoc } from '../store/pg.js'
+import { insertSession, getSession, insertMsg, getMemory, listAfterSeq, getDoc, getStagingFile } from '../store/pg.js'
 import { countPoints } from '../rag/qdrant.js'
 import { canReadDoc, aclFor } from '../acl.js'
 import { answerCacheKey, getAnswer, setAnswer, kbEpoch } from '../rag/answer-cache.js'
 import { activeCollection } from '../domain/registry.js'
+import { fenceUntrusted } from '../agent/injection.js'
 import { config } from '../config.js'
 
 /**
@@ -48,7 +49,7 @@ export default async function (app) {
     '/api/chat',
     { config: { rateLimit: { max: config.rate.chatMax, timeWindow: '1 minute' } } }, // chat 单独收紧限流
     async (req, reply) => {
-      const { question, topK = 5, sessionId, docId } = req.body ?? {}
+      const { question, topK = 5, sessionId, docId, stagingId } = req.body ?? {}
       if (!question?.trim()) return reply.code(400).send({ error: 'question 必填' })
       // 指定文档问答：docId 必须对当前用户可读（RBAC 单点判定），否则 404 不泄露存在性
       // M17 定向集合：文档级 QA 按文档所属集合检索（用户显式点名，定向无歧义），
@@ -57,6 +58,19 @@ export default async function (app) {
       if (docId) {
         doc = await getDoc(docId)
         if (!doc || !(await canReadDoc(req.user, doc))) return reply.code(404).send({ error: '文档不存在' })
+      }
+
+      // M20 对话内暂存附件：归属校验通过后注入附件说明（LLM 据此拿 stagingId 调 submit_document）；
+      // 写能力关闭或附件无效时静默忽略（上传失败的具体报错由 /api/staging 接口负责）
+      let stagingNote = null
+      if (config.write.enabled && stagingId) {
+        const st = await getStagingFile(stagingId).catch(() => null)
+        if (st && st.user_id === req.user.sub) {
+          // 文件名是用户可控文本：照 M16 惯例定界隔离，防注入载荷借附件说明进上下文
+          stagingNote =
+            `用户随本次消息上传了一个暂存文件：\n${fenceUntrusted(`stagingId=${st.id}\nfilename=${st.filename}\nsize=${st.size}`)}\n` +
+            '仅当用户明确要求把该文件写入/更新知识库时才调用 submit_document（stagingId 用上面的值，filename 用上面的文件名）；否则忽略该附件。'
+        }
       }
 
       // 会话：无 sessionId（或 sessionId 不属于当前用户）则以首问建新会话
@@ -182,7 +196,7 @@ export default async function (app) {
       const history = (await listAfterSeq(session.id, boundary))
         .map((m) => ({ role: m.role, content: m.content }))
 
-      // 组装最终输入：系统提示 → （可选）空库提示 → （可选）会话记忆摘要 → 断点后历史 → 当前问题
+      // 组装最终输入：系统提示 → （可选）空库提示 → （可选）会话记忆摘要 → 断点后历史 → （可选）暂存附件说明 → 当前问题
       const input = [
         { role: 'system', content: buildAgentSystem() },
         ...(kbEmptyNote ? [{ role: 'system', content: kbEmptyNote }] : []),
@@ -190,6 +204,7 @@ export default async function (app) {
           ? [{ role: 'system', content: `（早期对话记忆摘要，供参考）\n${memoryNote}` }]
           : []),
         ...history,
+        ...(stagingNote ? [{ role: 'system', content: stagingNote }] : []),
         { role: 'user', content: question },
       ]
 
@@ -206,6 +221,8 @@ export default async function (app) {
             docId, // 指定文档问答范围（可选），贯穿到 search_kb 子图
             collection: doc?.collection, // M17 定向集合：文档级 QA 检索文档所属集合
             acl,
+            user: req.user, // M20 写工具执行身份（canWriteDoc/审批归属/审计）
+            sessionId: session.id, // M20 写操作溯源
           })
         )
 

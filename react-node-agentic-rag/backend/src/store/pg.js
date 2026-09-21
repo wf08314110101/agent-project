@@ -84,6 +84,35 @@ ALTER TABLE documents ADD COLUMN IF NOT EXISTS effective_date TEXT NOT NULL DEFA
 ALTER TABLE users ADD COLUMN IF NOT EXISTS token_ver INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS refresh_hash TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS refresh_exp TIMESTAMPTZ;
+
+-- M20 写能力：审批单（HITL 两段式，审批单本身即落库审计记录）
+CREATE TABLE IF NOT EXISTS approvals (
+  id         TEXT PRIMARY KEY,                 -- UUID
+  session_id TEXT NOT NULL DEFAULT '',         -- 发起写操作的会话（关联续答）
+  user_id    TEXT NOT NULL,                    -- 发起人（owner 判定与审计）
+  tool       TEXT NOT NULL,                    -- 工具名（submit_document）
+  args       JSONB NOT NULL DEFAULT '{}'::jsonb, -- 工具参数快照（stagingId/docKey/collection…）
+  idem_key   TEXT NOT NULL,                    -- 服务端规范幂等键（部分唯一索引去重）
+  status     TEXT NOT NULL DEFAULT 'pending',  -- pending/executed/rejected/expired/failed
+  result     JSONB,                            -- 执行结果（doc 摘要）
+  error      TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at TIMESTAMPTZ NOT NULL,             -- 审批有效期（APPROVAL_TIMEOUT_SEC）
+  decided_at TIMESTAMPTZ                       -- 终态时间
+);
+CREATE INDEX IF NOT EXISTS idx_approvals_user ON approvals(user_id, status);
+-- 幂等去重：同键只允许一张 pending/executed 单（终态行不占键，可重新发起）
+CREATE UNIQUE INDEX IF NOT EXISTS idx_approvals_idem ON approvals(idem_key) WHERE status IN ('pending', 'executed');
+
+-- M20 暂存文件：对话内上传先落盘，批准后才 ingestOne（写工具的数据源）
+CREATE TABLE IF NOT EXISTS staging_files (
+  id         TEXT PRIMARY KEY,                 -- UUID，即工具参数 stagingId
+  user_id    TEXT NOT NULL,                    -- 归属（他人 stagingId 一律不可见）
+  filename   TEXT NOT NULL,
+  size       INTEGER NOT NULL,
+  path       TEXT NOT NULL,                    -- 落盘路径 uploads/staging/<id>.<ext>
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 `
 
 // 启动即初始化 schema；挂 no-op catch 防早期 unhandledRejection，真实错误由首个查询处抛出
@@ -332,6 +361,63 @@ export async function getMemory(sessionId) {
 }
 export async function updateMemory(summary, seq, sessionId) {
   await q('UPDATE sessions SET summary = $1, summarized_seq = $2 WHERE id = $3', [summary, seq, sessionId])
+}
+
+// ---- M20 写能力：审批单（HITL）----
+// 创建（幂等键去重）：键冲突时返回既有单（created=false），调用方按既有 status 给结论
+export async function insertApproval(id, sessionId, userId, tool, args, idemKey, expiresAt) {
+  const ins = await q(
+    `INSERT INTO approvals (id, session_id, user_id, tool, args, idem_key, expires_at)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
+     ON CONFLICT (idem_key) WHERE status IN ('pending', 'executed') DO NOTHING
+     RETURNING *`,
+    [id, sessionId ?? '', userId, tool, jsonParam(args ?? {}), idemKey, expiresAt]
+  )
+  if (ins.rows[0]) return { approval: ins.rows[0], created: true }
+  const ex = await q(
+    "SELECT * FROM approvals WHERE idem_key = $1 AND status IN ('pending', 'executed') ORDER BY created_at DESC LIMIT 1",
+    [idemKey]
+  )
+  return { approval: ex.rows[0] ?? null, created: false }
+}
+export async function getApproval(id) {
+  return (await q('SELECT * FROM approvals WHERE id = $1', [id])).rows[0] ?? null
+}
+export async function setApprovalStatus(status, result, error, id) {
+  await q(
+    `UPDATE approvals SET status = $1, result = $2::jsonb, error = $3,
+       decided_at = CASE WHEN $1 != 'pending' THEN now() ELSE decided_at END
+     WHERE id = $4`,
+    [status, result == null ? null : jsonParam(result), error, id]
+  )
+}
+export async function listApprovalsByUser(userId) {
+  return (
+    await q('SELECT * FROM approvals WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50', [userId])
+  ).rows
+}
+// 过期清扫：pending 且超时 → expired（返回过期单 id 列表供日志）
+export async function expireStaleApprovals() {
+  const { rows } = await q("UPDATE approvals SET status = 'expired', decided_at = now() WHERE status = 'pending' AND expires_at < now() RETURNING id")
+  return rows.map((r) => r.id)
+}
+
+// ---- M20 写能力：暂存文件 ----
+export async function insertStagingFile(id, userId, filename, size, path) {
+  await q('INSERT INTO staging_files (id, user_id, filename, size, path) VALUES ($1, $2, $3, $4, $5)', [
+    id, userId, filename, size, path,
+  ])
+}
+export async function getStagingFile(id) {
+  return (await q('SELECT * FROM staging_files WHERE id = $1', [id])).rows[0] ?? null
+}
+export async function deleteStagingFile(id) {
+  await q('DELETE FROM staging_files WHERE id = $1', [id])
+}
+// TTL 清扫：删除超时暂存行（返回 path 供调用方删盘）
+export async function deleteStagingOlderThan(cutoffIso) {
+  const { rows } = await q('DELETE FROM staging_files WHERE created_at < $1 RETURNING path', [cutoffIso])
+  return rows
 }
 
 /** 优雅退出时关闭连接池 */

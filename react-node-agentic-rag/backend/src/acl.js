@@ -70,3 +70,14 @@ export async function aclFor(user) {
     grants: grants.map((g) => g.doc_id),
   }
 }
+
+/**
+ * M20 唯一写权限判定：user 能否写入/替换 doc。
+ * doc=null（新建）任何登录用户可提交（成为 owner）；doc 存在（版本替换）须 owner 或 admin。
+ * 与 canReadDoc 同为 ACL 单点，写路径（写工具/审批执行）必须走它。
+ */
+export function canWriteDoc(user, doc = null) {
+  if (!user) return false
+  if (!doc) return true
+  return user.role === 'admin' || doc.user_id === (user.sub ?? user.id)
+}

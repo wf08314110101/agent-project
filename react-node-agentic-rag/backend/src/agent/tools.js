@@ -12,6 +12,8 @@ import { searchGraph } from './search-graph.js'
 import { validateSchema } from '../schema.js'
 import { fenceUntrusted } from './injection.js'
 import { domainToolDefs, domainHandlers } from '../domain/registry.js'
+import { writeToolDefs } from './write.js'
+import { config } from '../config.js'
 
 // 工具的 JSON Schema 描述：LLM 依据 description 和 parameters 决定何时调用、怎么传参
 const coreDefs = [
@@ -53,7 +55,12 @@ const coreDefs = [
 ]
 
 // M17：提供给 LLM 的完整工具表 = 内核 + 已激活领域包
-export const toolDefs = [...coreDefs, ...domainToolDefs]
+// M20：WRITE_TOOLS 开启时追加写工具（默认 off = 工具全只读，M16 零破坏面前提不破）
+export const toolDefs = [
+  ...coreDefs,
+  ...(config.write.enabled ? writeToolDefs : []),
+  ...domainToolDefs,
+]
 
 // 白名单正则：只允许数字与四则运算符/括号/百分号/空白，杜绝任意代码注入
 const SAFE_EXPR = /^[0-9+\-*/().%\s]+$/

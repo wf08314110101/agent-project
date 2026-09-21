@@ -10,8 +10,9 @@
 //   node scripts/evaluate.mjs --layer retrieval --assert "recall>=0.85,mrr>=0.7,purity=1"  # 阈值门禁（CI）
 //   node scripts/evaluate.mjs --detail                 # 逐题明细（失分归因定位）
 // 数据：core 轨 evals/golden-core.jsonl（65 题）+ evals/fixtures/*；
-//       domain 轨 backend/src/domain/api-docs/evals/golden.jsonl + 同目录 fixtures/
-//       （domain 轨要求服务以 DOMAIN_PACKS=api-docs 启动，fixture 上传到领域集合）
+//       domain 轨 backend/src/domain/<激活包>/evals/golden.jsonl + 同目录 fixtures/
+//       （domain 轨要求服务以 DOMAIN_PACKS=<pack> 启动，fixture 上传到 rag_<pack> 集合；
+//        未设 DOMAIN_PACKS 时默认 api-docs，保持 M17 行为）
 // 指标：
 //   检索层  recall@k = 期望特征被 topK 命中覆盖的比例；MRR = 首个期望块排名倒数；
 //           purity = 负向断言（expect_none 干扰关键词不得出现在命中里）通过率
@@ -49,12 +50,14 @@ if (!['all', 'core', 'domain'].includes(SUITE)) {
   process.exit(2)
 }
 
-// ---- 双轨数据源（M17）：golden 路径 + fixture 目录 + 上传目标集合 ----
-const DOM = 'backend/src/domain/api-docs/evals'
+// ---- 双轨数据源（M17/M21）：golden 路径 + fixture 目录 + 上传目标集合 ----
+// domain 轨随 DOMAIN_PACKS 动态解析（多包逗号分隔取首个）：evals/ 目录与 rag_{pack} 集合为领域包约定
+const PACK = (process.env.DOMAIN_PACKS ?? '').split(',').map((s) => s.trim()).filter(Boolean)[0] ?? 'api-docs'
+const DOM = `backend/src/domain/${PACK}/evals`
 const SUITES = SUITE === 'all' ? ['core', 'domain'] : [SUITE]
 const SUITE_CFG = {
   core: { golden: 'evals/golden-core.jsonl', fixtures: 'evals/fixtures', collection: '' },
-  domain: { golden: `${DOM}/golden.jsonl`, fixtures: `${DOM}/fixtures`, collection: 'rag_api_docs' },
+  domain: { golden: `${DOM}/golden.jsonl`, fixtures: `${DOM}/fixtures`, collection: `rag_${PACK.replace(/-/g, '_')}` },
 }
 
 // ---- 鉴权 ----
@@ -176,8 +179,8 @@ const judgeLLM = (() => {
 })()
 
 const faithfulnessPrompt = (answer, sources) => [
-  { role: 'system', content: '你是严格的答案忠实度评估器。判断「回答」中的每个事实性论断是否都能在「参考资料」中找到依据。回答里来自通用知识且参考资料未覆盖的内容，算作不忠实（unfaithful）。注意：来源的标题/文件名属于资料元信息，答案引用它们不算不忠实。只输出 JSON。' },
-  { role: 'user', content: `参考资料：\n${sources.map((s, i) => `[${i + 1}] ${s.filename || ''}${s.title ? ' · ' + s.title : ''}\n${s.text?.slice(0, 500)}`).join('\n') || '(无来源)'}\n\n回答：\n${answer}\n\n输出 {"score": 0到1的小数, "issues": ["不忠实论断列表"]}` },
+  { role: 'system', content: '你是严格的答案忠实度评估器。判断「回答」中的每个事实性论断是否都能在「参考资料」中找到依据。回答里来自通用知识且参考资料未覆盖的内容，算作不忠实（unfaithful）。注意：来源的标题/文件名/生效日期/版本号/废弃标注均属于资料元信息，答案引用它们不算不忠实。只输出 JSON。' },
+  { role: 'user', content: `参考资料：\n${sources.map((s, i) => `[${i + 1}] ${s.filename || ''}${s.title ? ' · ' + s.title : ''}${s.effectiveDate ? ' · 生效 ' + s.effectiveDate : ''}${s.docVersion > 1 ? ' · v' + s.docVersion : ''}${s.deprecated ? ' · 已废弃' : ''}\n${s.text?.slice(0, 500)}`).join('\n') || '(无来源)'}\n\n回答：\n${answer}\n\n输出 {"score": 0到1的小数, "issues": ["不忠实论断列表"]}` },
 ]
 const relevancePrompt = (question, answer) => [
   { role: 'system', content: '你是答案相关性评估器。判断「回答」是否真正回应了「问题」所问的内容（跑题、答非所问、空洞泛泛都算低分）。只输出 JSON。' },

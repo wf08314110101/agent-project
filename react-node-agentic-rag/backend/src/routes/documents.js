@@ -89,13 +89,25 @@ export default async function (app) {
   // M3 异步摄取：校验+去重+落盘入队即返回 202，解析/切块/嵌入由 worker 后台做，前端轮询状态
   app.post('/api/documents', async (req, reply) => {
     try {
-      // 接收单个文件，并施加大小限制（超限抛 RequestFileTooLargeError）
-      const file = await req.file({ limits: { fileSize: config.uploadMaxMb * 1024 * 1024 } })
+      // M21 修复：逐 part 消费完整 multipart——原 req.file()+toBuffer 可能在尾随 field part
+      // 到达前返回，collection/docKey 等偶发丢失；for-await 消费完整个流保证字段齐全
+      const limits = { fileSize: config.uploadMaxMb * 1024 * 1024 }
+      let file = null
+      let buf = null
+      const fields = {} // 与 file.fields 同形态：{ name: part }（part.value 取值）
+      for await (const part of req.parts({ limits })) {
+        if (part.type === 'file') {
+          if (file) continue // 单文件语义：只取首个文件 part，其余排空
+          file = part
+          buf = await part.toBuffer()
+        } else {
+          fields[part.fieldname] = part
+        }
+      }
       if (!file) return reply.code(400).send({ error: '缺少文件' })
       // 扩展名白名单校验（parser.js 中同名单，双保险）
       const ext = extOf(file.filename)
       if (!ACCEPT_EXT.has(ext)) return reply.code(400).send({ error: `不支持的类型 .${ext}` })
-      const buf = await file.toBuffer() // 一次性读入内存（已有 fileSize 上限保护）
 
       // M19 zip：路由层解压为多个独立文档（每 entry 一个 docId），表单字段作用于包内全部文件；
       // 响应为 {docs:[...]} 数组（单文件仍为 {doc}，前端兼容）
@@ -104,13 +116,13 @@ export default async function (app) {
         if (!entries.length) return reply.code(400).send({ error: '压缩包内没有可摄取的文件' })
         const docs = []
         for (const en of entries) {
-          const r = await ingestOne({ filename: en.filename, buf: en.data, fields: file.fields, user: req.user, log: req.log })
+          const r = await ingestOne({ filename: en.filename, buf: en.data, fields, user: req.user, log: req.log })
           docs.push({ filename: en.filename, ...(r.error ? { error: r.error } : r.duplicated ? { duplicated: true, doc: r.doc } : { doc: r.doc }) })
         }
         return reply.code(202).send({ docs })
       }
 
-      const r = await ingestOne({ filename: file.filename, buf, fields: file.fields, user: req.user, log: req.log })
+      const r = await ingestOne({ filename: file.filename, buf, fields, user: req.user, log: req.log })
       if (r.error) return reply.code(r.code).send({ error: r.error })
       if (r.duplicated) return reply.send({ duplicated: true, doc: r.doc })
       // 202 Accepted：任务已受理，尚未完成

@@ -1,0 +1,198 @@
+{
+  "meta": {
+    "ts": "2026-09-21T10:05:29.685Z",
+    "base": "http://localhost:8788",
+    "layer": "answer",
+    "suite": "domain",
+    "topK": 5,
+    "user": "demo"
+  },
+  "answer": {
+    "summary": {
+      "count": 12,
+      "mustOkRate": 1,
+      "faithfulness": 0.833,
+      "relevance": 1,
+      "totalTokens": 46517
+    },
+    "rows": [
+      {
+        "question": "员工入职满 1 年年假有几天",
+        "answer": "I'll search the knowledge base for the annual leave policy.根据《考勤管理制度》（v2，生效日期 2026-07-01）第6条：\n\n**入职满 1 年的带薪年假为 5 天。**[1]\n\n同一条还规定：满 3 年 10 天，满 5 年 15 天；年假当年有效，最多可跨年结转 1 个季度。[1]\n\n另外，若员工尚在试用期，第8条规定年假按入职月份比例折算，转正后补足。[1]",
+        "mustOk": true,
+        "missingMust": [],
+        "faithfulness": 0.5,
+        "faithIssues": [
+          "回答中提到的《考勤管理制度》（v2，生效日期 2026-07-01）中的版本号 v2 和生效日期 2026-07-01 在参考资料中未出现，属于无依据信息。"
+        ],
+        "relevance": 1,
+        "relReason": "回答直接给出入职满1年年假为5天，并附相关制度条款，完全回应了问题。",
+        "tokens": 3466,
+        "elapsedSec": 3.46,
+        "stopReason": "normal",
+        "traceId": "0df579189496b7d13dae7749c65d4ade"
+      },
+      {
+        "question": "现行考勤制度从哪一天开始施行",
+        "answer": "I'll search the knowledge base for the current attendance policy's effective date.现行考勤制度自 **2026-07-01** 起施行。\n\n依据《考勤管理制度》（v2）第10条：「本制度自 2026-07-01 起施行，2024-03-01 发布的 v1 版同时废止。」[1]\n\n补充说明：v1 版（2024-03-01 发布）已随 v2 施行而废止，仅存档备查 [2]。",
+        "mustOk": true,
+        "missingMust": [],
+        "faithfulness": 1,
+        "faithIssues": [],
+        "relevance": 1,
+        "relReason": "回答直接给出了现行考勤制度的施行日期（2026-07-01），并附有依据，完全回应了问题。",
+        "tokens": 3947,
+        "elapsedSec": 3.25,
+        "stopReason": "normal",
+        "traceId": "f39bf73b2e81dd10ca78442eedbbaa12"
+      },
+      {
+        "question": "旧版考勤制度迟到一次罚款多少",
+        "answer": "您问的是旧版（v1）的规定，先说明其失效状态：\n\n**《云枢科技员工考勤管理制度》（v1，已废止）** 第4条规定：迟到罚款为**每迟到一次罚款 50 元**，从当月工资中扣除；月累计迟到 5 次以上加记旷工 1 次 [3]。\n\n该版本自 2024-03-01 起施行，已随 v2 版（生效 2026-07-01）的施行而**同时废止** [2][3]。\n\n**现行版本（v2，2026-07-01 生效）已取消罚款**：《考勤管理制度》第5条规定，当月迟到 3 次以内且每次不超过 10 分钟的，仅作口头警示，不予罚款；当月超过 3 次的，自第 4 次起每次绩效扣 2 分 [1]。附则第10条明确 v1 版同时废止 [2]。\n\n因此，若您需要按现行制度执行，请以 v2 的警示制为准；50 元/次的罚款仅适用于已废止的 v1 版。",
+        "mustOk": true,
+        "missingMust": [],
+        "faithfulness": 1,
+        "faithIssues": [],
+        "relevance": 1,
+        "relReason": "回答直接给出旧版迟到罚款为50元/次，并附条款与失效说明，完全回应了问题所问。",
+        "tokens": 4549,
+        "elapsedSec": 3.06,
+        "stopReason": "normal",
+        "traceId": "c25b33a217760524e7d7c0655b165157"
+      },
+      {
+        "question": "现行考勤制度的弹性通勤窗口比旧版放宽到多少分钟",
+        "answer": "I'll search the knowledge base for the current attendance policy's flexible commuting window.**现行版（v2，2026-07-01 生效）：弹性通勤窗口为 60 分钟。**\n\n依据《考勤管理制度》v2 第4条：员工在 7:30-9:30 之间到岗均视为正常出勤，弹性窗口为 60 分钟（v1 版为 30 分钟，本次放宽）[1]。\n\n补充说明：\n\n- 旧版 v1（2024-03-01 发布）的弹性窗口为 30 分钟，到岗区间为 8:30-9:00 [3]。该版本已由 v2 第10条明确废止（\"本制度自 2026-07-01 起施行，2024-03-01 发布的 v1 版同时废止\"）[2]，上述 v1 内容仅作版本对比参考。\n- 因此，本次放宽幅度为 30 分钟 → 60 分钟 [1][2]。",
+        "mustOk": true,
+        "missingMust": [],
+        "faithfulness": 1,
+        "faithIssues": [],
+        "relevance": 1,
+        "relReason": "回答直接给出弹性通勤窗口放宽到60分钟，并对比旧版30分钟，完全回应了问题所问。",
+        "tokens": 4568,
+        "elapsedSec": 3.77,
+        "stopReason": "normal",
+        "traceId": "29562929ec091f536824e55ad7fad2a7"
+      },
+      {
+        "question": "出差到一线城市住宿每晚限额多少",
+        "answer": "I'll look up the travel expense policy in the knowledge base.根据《云枢科技差旅费管理制度》（生效日期 2025-10-01）第4条：\n\n**一线城市（北京/上海/广州/深圳）住宿标准为每晚 600 元** [1]。\n\n同一条还规定：其他城市每晚 400 元；同性别同事出差原则上合住 [1]。\n\n补充两点相关要求：\n- 出差须提前在 OA 系统提交出差申请，未经批准的费用不予报销（第2条）[1]\n- 出差返回后 5 个工作日内提交报销单，逾期系统自动关闭入口，特殊情况须经财务总监批准（第6条）[1]",
+        "mustOk": true,
+        "missingMust": [],
+        "faithfulness": 0.5,
+        "faithIssues": [
+          "回答中提到的生效日期 2025-10-01 在参考资料中未出现，属于无依据信息。"
+        ],
+        "relevance": 1,
+        "relReason": "回答直接给出了一线城市住宿每晚600元的限额，并附上制度依据，完全回应了问题所问。",
+        "tokens": 3664,
+        "elapsedSec": 2.77,
+        "stopReason": "normal",
+        "traceId": "7b42d9037a087668f89d89f3d84e3cb5"
+      },
+      {
+        "question": "差旅费须在返回后多少个工作日内提交报销",
+        "answer": "I'll search the knowledge base for the travel expense reimbursement policy.根据《云枢科技差旅费管理制度》（生效日期 2025-10-01）第6条：\n\n**出差返回后 5 个工作日内提交报销单**，逾期系统自动关闭入口；特殊情况须经财务总监批准。[1]\n\n（该制度第2条同时规定：出差须提前在 OA 系统提交出差申请，未经批准的差旅费用不予报销。[1]）",
+        "mustOk": true,
+        "missingMust": [],
+        "faithfulness": 0.5,
+        "faithIssues": [
+          "回答中提到的生效日期 2025-10-01 在参考资料中未出现，属于无依据信息。"
+        ],
+        "relevance": 1,
+        "relReason": "回答直接给出返回后5个工作日内提交报销单，并附制度依据，完全回应了问题所问的时限。",
+        "tokens": 3614,
+        "elapsedSec": 2.44,
+        "stopReason": "normal",
+        "traceId": "ca0f633d64b81e988102825f11d05be8"
+      },
+      {
+        "question": "单笔报销超过多少元需要财务总监会签",
+        "answer": "I'll search the knowledge base for the reimbursement approval thresholds.根据《云枢科技费用报销制度》（生效日期 2025-06-01）第4条「审批权限」：\n\n- **单笔金额超过 5000 元的报销，需财务总监会签**[1]\n- 超过 50000 元的，需总经理审批[1]\n\n也就是说，财务总监会签的门槛是**单笔超过 5000 元**（5000 元及以下无需会签）。",
+        "mustOk": true,
+        "missingMust": [],
+        "faithfulness": 0.5,
+        "faithIssues": [
+          "回答中提到的生效日期 2025-06-01 在参考资料中未出现，属于无依据信息",
+          "回答中'5000 元及以下无需会签'的推断在参考资料中未明确说明，属于超出资料范围的推断"
+        ],
+        "relevance": 1,
+        "relReason": "回答直接给出了财务总监会签的具体金额门槛（单笔超过5000元），并附制度依据，完全回应了问题所问。",
+        "tokens": 3625,
+        "elapsedSec": 2.44,
+        "stopReason": "normal",
+        "traceId": "3060fed980ecded3d20956c5290af0f7"
+      },
+      {
+        "question": "发票开具日期超过多少天不予报销",
+        "answer": "I'll search the knowledge base for the reimbursement rules on invoice dates.**发票开具日期超过 90 天的不予报销。**\n\n依据《云枢科技费用报销制度》第5条（生效日期 2025-06-01）：「时效要求：发票开具日期超过 90 天的不予报销；报销单自提交之日起，财务 10 个工作日内完成打款。」[1]\n\n补充两点相关时限，供参考：\n\n- **月度受理截止**：每月 25 日为当月报销受理截止日，25 日后提交的单据顺延至下月处理（《费用报销制度》第6条）[1]\n- **差旅费另有更严时限**：出差返回后 5 个工作日内提交报销单，逾期系统自动关闭入口，特殊情况须经财务总监批准（《云枢科技差旅费管理制度》第6条，生效 2025-10-01）[2]\n\n也就是说，差旅类报销除受 90 天发票时效约束外，还须在返回后 5 个工作日内提交。",
+        "mustOk": true,
+        "missingMust": [],
+        "faithfulness": 1,
+        "faithIssues": [],
+        "relevance": 1,
+        "relReason": "回答直接给出90天的明确答案，并附制度依据和相关时限补充，完全回应了问题。",
+        "tokens": 4095,
+        "elapsedSec": 2.84,
+        "stopReason": "normal",
+        "traceId": "5a32a44fb47f61d778b4bf2d16c93bb4"
+      },
+      {
+        "question": "发现泄密事件须在多长时间内报告",
+        "answer": "I'll search the knowledge base for this.根据《云枢科技信息安全管理制度》（生效日期 2025-01-01）：\n\n**发现泄密或疑似泄密事件，须在 24 小时内报告信息安全组，不得自行处置或隐瞒。**（《信息安全管理制度》第8条）[1]\n\n补充说明：该制度第9条明确本制度自 2025-01-01 起施行 [1]，目前检索到的版本均为该生效版本，未发现新旧版本冲突。",
+        "mustOk": true,
+        "missingMust": [],
+        "faithfulness": 1,
+        "faithIssues": [],
+        "relevance": 1,
+        "relReason": "回答直接给出了泄密事件的报告时限（24小时内），并引用了具体制度条款，完全回应了问题所问。",
+        "tokens": 3541,
+        "elapsedSec": 2.61,
+        "stopReason": "normal",
+        "traceId": "5203c5a0f2b8fc0ecb6992d75640e0df"
+      },
+      {
+        "question": "现在采购申请还能走线下纸质审批吗",
+        "answer": "I'll search the knowledge base for the relevant policy.**不能走线下纸质审批了。**\n\n知识库中检索到的《云枢科技采购管理制度》**已废止**（生效 2023-05-01，于 2025-08-01 废止），其中第2条规定的\"填写纸质《采购申请单》，经部门经理、采购专员、财务三级线下签字审批\"流程已不再适用 [1]。\n\n该制度第5条明确：本制度于 2025-08-01 废止，**废止后采购事宜按 OA 系统新流程执行** [1]；文档存档说明也载明\"采购审批流程整体迁移至 OA 系统线上审批，本文仅存档备查\" [2]。\n\n因此，现行做法是走 **OA 系统线上审批**，纸质线下审批已随旧制度一并停止。\n\n需要说明的是：知识库中目前只检索到这份已废止的旧版制度，**未检索到 OA 系统新流程的现行制度文本**，所以新流程的具体审批层级、金额权限等细节我无法依据资料告知。如需确认，建议查阅 OA 系统中的最新流程说明或联系采购/财务部门。",
+        "mustOk": true,
+        "missingMust": [],
+        "faithfulness": 1,
+        "faithIssues": [],
+        "relevance": 1,
+        "relReason": "回答直接明确回应了问题，指出不能走线下纸质审批，并引用已废止制度说明现行OA线上审批流程，还诚实说明知识库未检索到新流程细节，完全切题。",
+        "tokens": 3794,
+        "elapsedSec": 3.32,
+        "stopReason": "normal",
+        "traceId": "e779efb7b17642ef2422c2e497162e04"
+      },
+      {
+        "question": "每月报销受理的截止日期是几号",
+        "answer": "I'll search the knowledge base for the reimbursement deadline.根据《云枢科技费用报销制度》（生效日期 2025-06-01）：\n\n**每月报销受理截止日为每月 25 日**；25 日之后提交的单据顺延至下月处理。[1]\n\n另外提醒两点相关时效规定：\n- 发票开具日期超过 90 天的不予报销；报销单自提交之日起，财务 10 个工作日内完成打款。[1]\n- 报销须通过 OA 系统线上提交，纸质单据随后归档，口头申请一律无效。[1]",
+        "mustOk": true,
+        "missingMust": [],
+        "faithfulness": 1,
+        "faithIssues": [],
+        "relevance": 1,
+        "relReason": "回答直接给出每月报销受理截止日为25日，并附相关时效说明，完全回应了问题。",
+        "tokens": 3690,
+        "elapsedSec": 3.43,
+        "stopReason": "normal",
+        "traceId": "5834323b0bba45471c4e469f361d7e43"
+      },
+      {
+        "question": "现行考勤制度当月迟到几次以内只作口头警示",
+        "answer": "I'll search the knowledge base for the current attendance policy on late arrivals.**现行规定：当月迟到 3 次以内，且每次不超过 10 分钟的，仅作口头警示，不予罚款。**\n\n依据《考勤管理制度》（v2，生效日期 2026-07-01）第5条：迟到处理——当月迟到 3 次以内且每次不超过 10 分钟的，仅作口头警示，不予罚款；当月超过 3 次的，自第 4 次起每次绩效扣 2 分 [1]。\n\n补充说明：\n- 该制度自 2026-07-01 起施行，2024-03-01 发布的 v1 版同时废止 [2]。\n- 旧版（v1，已废止）按每次罚款 50 元执行，v2 起取消罚款改为警示制 [1][2]。如您需要了解旧版口径，请另行说明。",
+        "mustOk": true,
+        "missingMust": [],
+        "faithfulness": 1,
+        "faithIssues": [],
+        "relevance": 1,
+        "relReason": "回答直接给出当月迟到3次以内仅作口头警示的具体规定，并附制度依据，完全回应了问题所问。",
+        "tokens": 3964,
+        "elapsedSec": 3.21,
+        "stopReason": "normal",
+        "traceId": "b762ef929e7e60b49a3f076625a5b643"
+      }
+    ]
+  }
+}

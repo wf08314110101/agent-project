@@ -29,6 +29,7 @@ React 5174 ──SSE── Fastify 8788 ──┬── DeepSeek (LLM, 工具调
 - **语料时效与冲突治理（M18）**：文档版本组 `docKey` + `docVersion/effectiveDate` 元数据贯通（上传 → payload → 检索 → 前端徽标）；同 docKey 重传自动**版本化替换**（`DOC_REPLACE_MODE=off|auto|on`，默认 core 关、领域集合开）；检索层**版本消解**（同组旧版块剔除，最新版全量保留；docId 定向旧版仍可查）+ **deprecated 降权**（`DEPRECATED_PENALTY=0.3`，降权非硬滤）；grade 增 `conflict` 冲突标记，答案按版本取舍或列明双方
 - **多格式摄取与 OCR（M19）**：parser 重构为注册表（`registerParser(ext, fn)`，与 chunker/prompt 注册同风格）。新增：①**扫描件 PDF**——pdfjs-dist 文本层字符密度判扫描（<100 字/页）→ 逐页渲染 PNG（@napi-rs/canvas）→ 视觉大模型转录（页间拼 `## 第 N 页`）；②**图片直传** png/jpg/jpeg/webp → VLM 转录（截图/表格/票据）；③**docx 升级**——mammoth convertToHtml 保标题/表格结构（标题→井号、单元格→` | `）+ 内嵌图 OCR 行内 `【图：…】`；④**zip 包**——路由层解压（yauzl）每 entry 独立入队（filename=包内路径，202 返回 `{docs:[...]}`，单文件 `{doc}` 不变），防 zip bomb（≤100 文件/100MB/不递归嵌套）+ 中文文件名解码修复（UTF-8 严格优先回退 latin1）。OCR 走 OpenAI 兼容视觉模型（`OCR_MODEL` 未配自动降级：扫描件仅文本层、图片跳过，不阻断；`OCR_BASE_URL/OCR_API_KEY` 缺省复用 LLM 配置；`OCR_MAX_PAGES=30` 成本闸）；转录提示词只约束「逐字原文」防语料失真；测试配套 `scripts/mock-vlm.mjs`（按图片尺寸返回固定转录，零外部依赖）+ `scripts/gen-m19-fixtures.mjs`（脚本生成扫描 PDF/含图 docx/表格截图）
 - **Agent 写能力与人工审批（M20）**：`submit_document` 写工具（提交/替换知识库文档，复用上传摄取管线）+ 安全三件套同批落地——①**幂等键**（服务端规范键 `sha256(user|collection|docKey|contentHash)`，approvals 部分唯一索引兜底，重复提交拿同一张单/已执行结论）；②**写权限**（`canWriteDoc` 单点：新建任意 owner，替换他人版本组须 owner/admin；目标集合白名单）；③**两段式人工审批**（HITL）：toolsNode 拦截写工具不执行 → 落 approvals 表 → SSE `approval_required` 弹确认卡片 → 本轮以「等待审批」收尾 → 用户批准 → confirm 执行 → 前端自动续答报告入库结果。对话内📎上传先暂存（`POST /api/staging`），批准前写入不生效；审批单/暂存同 TTL（`APPROVAL_TIMEOUT_SEC=900`）定时清扫；审计：`rag.write_action` span 属性 + 审批单落库（who/what/result/decided_at）。`WRITE_TOOLS=false`（默认）时写工具不进工具表，M16「工具全只读」零破坏面原样保留；MCP 维持只读不破例
+- **第二领域包 company-policy（M21）**：制度文档包，验证五件套模式可复制性 + 给 M20 写闭环真实演示场景（对话上传新制度 → 审批 → 旧版自动版本化替换 → 问答按版本取舍）。与 api-docs 差异——**五件套可裁剪**：无领域工具/无连接器（制度语料经上传/写工具进入），只保留集合归属 + 切分策略 + 提示片段 + 词表；**条款式切分器**按「第X章/第X条」切条（条为原子单位 + 章边界强制分块，300 字/块调参：制度单条很短，整包塞多条会稀释单条事实的嵌入信号）；提示片段带条款号逐字引用/版本取舍/已废止声明/写入指引（collection=包集合、docKey=policy/<主题>——E2E 实测无指引模型写入默认落 core）；语料 6 份 fixture（考勤 v1/v2 版本对 + deprecated）+ 12 题评测（retrieval recall@5=1.0 / answer 全满分）；`scripts/seed-domain.mjs` 播种脚本，evaluate.mjs domain 轨随 `DOMAIN_PACKS` 参数化；顺带修复 multipart 尾随字段偶发丢失（`req.file()`+`toBuffer()` 竞态 → 逐 part 消费）
 - **会话**：多轮上下文（超窗滚动摘要压缩，seq 断点零丢失）、消息+步骤+来源持久化回放、会话增删
 - **思维链通道**：reasoning token 走独立 SSE 事件（deepseek-reasoner 等模型自动生效），前端折叠面板展示，不与正文混流
 - **鉴权**：预置用户 + JWT 登录（scrypt 存储密码），会话/文档按用户隔离；登录接口单独限流
@@ -79,7 +80,7 @@ docker compose up -d backend frontend
 | `JWT_ACCESS_TTL` / `JWT_REFRESH_DAYS` | 15m / 30 | access 短效期（M14 无状态校验）/ refresh 有效期天数（单活旋转） |
 | `AUTH_USERS` | - | 预置用户 `用户名:密码[:角色[:部门]]`（M10），角色 member/admin；启动播种（不配则无人能登录） |
 | `MCP_ENABLED` / `MCP_ACCESS_USER` / `MCP_HTTP_TOKEN` | true / - / - | MCP Server（M13）：服务身份用户名（空 = 仅 public 匿名）/ 非空才挂 `POST /mcp`（Bearer）；stdio 入口不受这两项控制 |
-| `DOMAIN_PACKS` | 空 | 领域包单激活（M17，当前可选 `api-docs`）：主检索集合切 `rag_api_docs`、标签词表/切分策略/提示片段由包注入、上传接受 `collection=rag_api_docs`；留空 = 纯 core 零破坏 |
+| `DOMAIN_PACKS` | 空 | 领域包单激活（M17，当前可选 `api-docs` / `company-policy`）：主检索集合切 `rag_<pack>`、标签词表/切分策略/提示片段由包注入、上传接受 `collection=rag_<pack>`；company-policy 语料经 `node scripts/seed-domain.mjs` 播种；留空 = 纯 core 零破坏 |
 | `DOC_REPLACE_MODE` | `auto` | 版本化替换（M18）：同 docKey 重传内容变化时删旧插新（version+1）。`off`=不替换新旧共存 ｜ `on`=全集合替换 ｜ `auto`=core 关、领域集合开 |
 | `DEPRECATED_PENALTY` | `0.3` | deprecated 文档命中融合分乘数（M18，降权非硬滤——明确问旧版仍可召回；1 = 不降权） |
 | `OCR_PROVIDER` / `OCR_MODEL` | `vlm` / 空 | OCR 视觉转录（M19）：`OCR_MODEL` 填视觉模型名才启用（DeepSeek 无视觉需另配 provider）；空 = 关闭（扫描件仅文本层、图片跳过，不阻断摄取） |
@@ -165,14 +166,18 @@ DOMAIN_PACKS=api-docs npm start          # backend/.env 配置同效
 npm run domain:sync                      # 手动同步 Vue 中文文档 → rag_api_docs（幂等）
                                          # 或 DOMAIN_SYNC_INTERVAL_MIN=1440 启用每日定时
 # 上传/评测注入领域语料：multipart 带 collection=rag_api_docs（白名单校验）
+
+# 领域模式：启用 company-policy 包（企业制度，本地语料无连接器）
+DOMAIN_PACKS=company-policy npm start
+node scripts/seed-domain.mjs             # 播种制度语料 → rag_company_policy（幂等，读 DOMAIN_PACKS）
 ```
 
-启用后：主检索集合切到 `rag_api_docs`（问答/裸检索/MCP 同源切换；文档级 QA 按文档所属集合定向检索）、领域工具 `fetch_api_doc` 进工具表、领域提示片段（废弃接口不作为依据）追加系统提示、标签词表覆盖为包定义（前端经 `/api/meta` 动态获取，文档列表显示集合列 + 废弃标注）。删除包 = 停用 env + drop collection，数据零残留。新领域包照 `api-docs` 五件套复制（index/tools/chunker/prompts/connector/evals）+ registry 注册一行。
+启用后：主检索集合切到 `rag_<pack>`（问答/裸检索/MCP 同源切换；文档级 QA 按文档所属集合定向检索）、领域提示片段追加系统提示、标签词表覆盖为包定义（前端经 `/api/meta` 动态获取，文档列表显示集合列 + 废弃标注）。删除包 = 停用 env + drop collection，数据零残留。新领域包照 `api-docs` 五件套复制（index/tools/chunker/prompts/connector/evals，工具/连接器可裁剪，见 `company-policy`）+ registry 注册一行。
 
 ## 回归与评估
 
 ```bash
-# 单元测试（node:test，57 例：ACL/MCP/parser/写能力 HITL）
+# 单元测试（node:test，63 例：ACL/MCP/parser/写能力 HITL/领域包 company-policy）
 cd backend && npm test
 
 # M19 OCR 链路测试（零外部依赖：mock 视觉模型按图片尺寸返回固定转录）
@@ -191,7 +196,7 @@ BASE_URL=http://localhost:8080 node scripts/regression.mjs   # 打容器栈
 # 质量水位（M6，M17 起双轨）：core 65 题 + domain 业务 12 题，各自独立基线与门禁
 node scripts/evaluate.mjs --layer retrieval            # 双轨检索层：recall@k / MRR / purity（零 LLM，秒级）
 node scripts/evaluate.mjs --suite core                 # 只跑 core 轨（冻结 65 题，内核回归门禁）
-node scripts/evaluate.mjs --suite domain               # 只跑 domain 轨（业务题，要求 DOMAIN_PACKS=api-docs 启动）
+node scripts/evaluate.mjs --suite domain               # 只跑 domain 轨（业务题，要求 DOMAIN_PACKS=<pack> 启动，语料先 seed-domain.mjs 播种）
 node scripts/evaluate.mjs                              # 全量：双轨 + 答案层 mustOk / faithfulness / relevance
 node scripts/evaluate.mjs --baseline evals/results/<旧档>.json   # 与基线对比（调参前后 A/B）
 node scripts/evaluate.mjs --detail                     # 逐题明细（期望缺失/干扰混入/忠实度问题逐条归因）
@@ -221,10 +226,11 @@ M9 cross-encoder 实验结论（[reranker.js](backend/src/rag/reranker.js) + `re
 backend/src/  server·config·auth·acl ｜ routes/(auth·chat·documents·sessions·staging·approvals·debug·admin·health)
               rag/(parser·chunker·embedder·tokenizer·qdrant·ingest·ingest-one·ocr·retriever·reranker·websearch·answer-cache)
               agent/(graph·search-graph·tools·write·prompts·memory·injection) ｜ store/pg ｜ mcp/(mcp-server·stdio·http) ｜ obs/otel
-              domain/(registry + api-docs 五件套：index·tools·chunker·prompts·connector·evals)  # M17 领域包
+              domain/(registry + api-docs 五件套：index·tools·chunker·prompts·connector·evals  # M17 领域包①
+                     + company-policy 五件套裁剪版：index·chunker·prompts·meta·evals  # M21 领域包②，无工具/连接器)
 frontend/src/ App ｜ components/(Login·ChatTab·DocsTab) ｜ api(token + SSE 解析)
-scripts/      regression.mjs（回归）· evaluate.mjs（评估，--suite 双轨）· backend/scripts/(mcp-smoke.mjs·domain-sync.mjs) · migrate-sqlite-to-pg.mjs（M11 迁移）
-evals/        golden-core.jsonl（core 65 题标注）· fixtures/（10 文档 + 版本组 sidecar）· results/（基线存档）；domain 轨随包：domain/api-docs/evals/
+scripts/      regression.mjs（回归）· evaluate.mjs（评估，--suite 双轨）· seed-domain.mjs（领域语料播种，M21）· backend/scripts/(mcp-smoke.mjs·domain-sync.mjs) · migrate-sqlite-to-pg.mjs（M11 迁移）
+evals/        golden-core.jsonl（core 65 题标注）· fixtures/（10 文档 + 版本组 sidecar）· results/（基线存档）；domain 轨随包：domain/<pack>/evals/
 .github/      workflows/ci.yml（回归 + 镜像构建）
 docs/         功能演进时间线.md
 ```

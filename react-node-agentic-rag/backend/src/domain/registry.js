@@ -17,8 +17,9 @@ import { registerChunker } from '../rag/ingest.js'
 import { registerPromptFragment } from '../agent/prompts.js'
 
 import apiDocs from './api-docs/index.js'
+import companyPolicy from './company-policy/index.js'
 
-const ALL_PACKS = [apiDocs]
+const ALL_PACKS = [apiDocs, companyPolicy]
 
 // 单激活：工具表会进 system prompt，全拼会 token 膨胀且干扰工具选择，故 env 显式指定
 const enabled = new Set(

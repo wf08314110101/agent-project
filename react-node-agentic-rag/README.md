@@ -28,6 +28,7 @@ React 5174 ──SSE── Fastify 8788 ──┬── DeepSeek (LLM, 工具调
 - **文档预览（M17）**：摄取原件保留（不再处理完即删），`GET /api/documents/:id/content` 原样回传（canReadDoc 鉴权，pdf 浏览器原生渲染，文本类 text/plain，html 不 inline 防 XSS），前端点文件名新标签页预览
 - **语料时效与冲突治理（M18）**：文档版本组 `docKey` + `docVersion/effectiveDate` 元数据贯通（上传 → payload → 检索 → 前端徽标）；同 docKey 重传自动**版本化替换**（`DOC_REPLACE_MODE=off|auto|on`，默认 core 关、领域集合开）；检索层**版本消解**（同组旧版块剔除，最新版全量保留；docId 定向旧版仍可查）+ **deprecated 降权**（`DEPRECATED_PENALTY=0.3`，降权非硬滤）；grade 增 `conflict` 冲突标记，答案按版本取舍或列明双方
 - **多格式摄取与 OCR（M19）**：parser 重构为注册表（`registerParser(ext, fn)`，与 chunker/prompt 注册同风格）。新增：①**扫描件 PDF**——pdfjs-dist 文本层字符密度判扫描（<100 字/页）→ 逐页渲染 PNG（@napi-rs/canvas）→ 视觉大模型转录（页间拼 `## 第 N 页`）；②**图片直传** png/jpg/jpeg/webp → VLM 转录（截图/表格/票据）；③**docx 升级**——mammoth convertToHtml 保标题/表格结构（标题→井号、单元格→` | `）+ 内嵌图 OCR 行内 `【图：…】`；④**zip 包**——路由层解压（yauzl）每 entry 独立入队（filename=包内路径，202 返回 `{docs:[...]}`，单文件 `{doc}` 不变），防 zip bomb（≤100 文件/100MB/不递归嵌套）+ 中文文件名解码修复（UTF-8 严格优先回退 latin1）。OCR 走 OpenAI 兼容视觉模型（`OCR_MODEL` 未配自动降级：扫描件仅文本层、图片跳过，不阻断；`OCR_BASE_URL/OCR_API_KEY` 缺省复用 LLM 配置；`OCR_MAX_PAGES=30` 成本闸）；转录提示词只约束「逐字原文」防语料失真；测试配套 `scripts/mock-vlm.mjs`（按图片尺寸返回固定转录，零外部依赖）+ `scripts/gen-m19-fixtures.mjs`（脚本生成扫描 PDF/含图 docx/表格截图）
+- **Agent 写能力与人工审批（M20）**：`submit_document` 写工具（提交/替换知识库文档，复用上传摄取管线）+ 安全三件套同批落地——①**幂等键**（服务端规范键 `sha256(user|collection|docKey|contentHash)`，approvals 部分唯一索引兜底，重复提交拿同一张单/已执行结论）；②**写权限**（`canWriteDoc` 单点：新建任意 owner，替换他人版本组须 owner/admin；目标集合白名单）；③**两段式人工审批**（HITL）：toolsNode 拦截写工具不执行 → 落 approvals 表 → SSE `approval_required` 弹确认卡片 → 本轮以「等待审批」收尾 → 用户批准 → confirm 执行 → 前端自动续答报告入库结果。对话内📎上传先暂存（`POST /api/staging`），批准前写入不生效；审批单/暂存同 TTL（`APPROVAL_TIMEOUT_SEC=900`）定时清扫；审计：`rag.write_action` span 属性 + 审批单落库（who/what/result/decided_at）。`WRITE_TOOLS=false`（默认）时写工具不进工具表，M16「工具全只读」零破坏面原样保留；MCP 维持只读不破例
 - **会话**：多轮上下文（超窗滚动摘要压缩，seq 断点零丢失）、消息+步骤+来源持久化回放、会话增删
 - **思维链通道**：reasoning token 走独立 SSE 事件（deepseek-reasoner 等模型自动生效），前端折叠面板展示，不与正文混流
 - **鉴权**：预置用户 + JWT 登录（scrypt 存储密码），会话/文档按用户隔离；登录接口单独限流
@@ -84,6 +85,9 @@ docker compose up -d backend frontend
 | `OCR_PROVIDER` / `OCR_MODEL` | `vlm` / 空 | OCR 视觉转录（M19）：`OCR_MODEL` 填视觉模型名才启用（DeepSeek 无视觉需另配 provider）；空 = 关闭（扫描件仅文本层、图片跳过，不阻断摄取） |
 | `OCR_BASE_URL` / `OCR_API_KEY` | 复用 LLM_* | 视觉模型端点（M19）常与对话模型不同 provider，可独立指定 |
 | `OCR_MAX_PAGES` / `OCR_MAX_IMAGES` | `30` / `20` | 单文档扫描页/内嵌图转录上限（M19 成本闸，超出截断并标注） |
+| `WRITE_TOOLS` | `false` | Agent 写工具开关（M20）：`true` 暴露 `submit_document`（需人工审批）；`false` 不进工具表，零破坏面 |
+| `WRITE_AUTO_APPROVE` | `false` | 跳过人工审批直接执行（M20，仅测试/演示；生产必须 false） |
+| `APPROVAL_TIMEOUT_SEC` | `900` | 审批单有效期秒（M20，超时自动过期；暂存文件同 TTL 清理） |
 | `DOMAIN_SYNC_INTERVAL_MIN` / `DOMAIN_SYNC_MAX_FILES` | 0 / 40 | 连接器定时同步间隔分钟（0 = 仅手动 `npm run domain:sync`）/ 单次最多摄取文件数 |
 | `DOMAIN_SYNC_REPO` / `DOMAIN_SYNC_BRANCH` / `DOMAIN_SYNC_DIR` / `DOMAIN_SYNC_DEPRECATED_DIR` | vuejs-translations/docs-zh-cn / main / src/ / 空 | 同步源 GitHub md 仓库 / 分支 / 子目录 / 废弃区子目录（deprecated 标注） |
 | `GITHUB_TOKEN` | - | GitHub API Token（可选，防匿名 60 次/h 限流） |
@@ -101,7 +105,11 @@ docker compose up -d backend frontend
 | GET | `/api/documents/events` | 摄取进度 SSE（`docs` 快照 + `doc` 单文档进度%），按可见性推送 |
 | PATCH | `/api/documents/:id` | 密级/标签/授权（`grants`: 用户名数组）；owner 或 admin；ready 文档同步刷 Qdrant payload 即时生效 |
 | DELETE | `/api/documents/:id` | 先删向量再删元数据；摄取中返回 409；不可读文档 404 |
-| POST | `/api/chat` | `{question, topK, sessionId?, docId?}` → SSE；docId 走 canReadDoc 单点判定（不可读 404） |
+| POST | `/api/chat` | `{question, topK, sessionId?, docId?, stagingId?}` → SSE；docId 走 canReadDoc 单点判定（不可读 404）；stagingId 为对话内暂存附件（M20，归属校验通过后注入附件说明供写工具取用） |
+| POST | `/api/staging` | 对话内暂存上传（M20，multipart 单文件，50MB/白名单扩展），`{stagingId, filename, size}`；写能力关闭 403 |
+| GET | `/api/approvals` | 本人审批单列表（最新 50，M20） |
+| POST | `/api/approvals/:id/confirm` | 批准并执行写操作（M20）：校验归属/状态/有效期 → 读暂存 → ingestOne → 结果回填；执行失败 422 |
+| POST | `/api/approvals/:id/reject` | 拒绝写操作（M20）；已处理 409，仅本人 |
 | GET | `/api/sessions` · `/:id/messages` · DELETE | 会话管理（按用户隔离，他人会话 404） |
 | GET | `/api/debug/retrieval?q=&topK=` | 裸检索观测（评估数据源/调参用），受 ACL 约束；带 docId 按文档所属集合定向 |
 | GET | `/api/meta` | 公开元信息：当前生效标签词表（随领域包注入变化） |
@@ -112,11 +120,11 @@ docker compose up -d backend frontend
 
 **M10 RBAC**：密级三级 `public`（全体登录用户）/ `dept`（同归属人部门）/ `private`（仅 owner + 显式授权），受控标签枚举（技术方案/制度/会议纪要/运维/竞品/测试）。密级下沉为 Qdrant payload 在**召回前服务端过滤**（ownerId/classification/ownerDept），检索后隐藏等于没保护；`canReadDoc`（backend/src/acl.js）是唯一可读性判定单点，不可读一律 404 不泄露存在性；role/dept 签发进 JWT payload（M14 无状态校验），改权限 bump token_ver 即刻失效旧 token。PATCH 密级同步 `setPayload`，改完即生效无需重摄；启动时对无密级旧点位回填 public（保持升级前可见性）。新上传默认 private。
 
-`POST /api/chat` 事件流：`step`(action/observation，时间线) → `sources`(来源卡片，带全局引用编号) → `delta`(正文 token) ｜ `reasoning`(思维链 token，独立通道) → `usage`(轮次/token/耗时) → `done`(stopReason: normal/max_iter/abort/error/cache) ｜ `error`。`stopReason=cache` 表示命中回答缓存直接回放（usage 为原答用量，rounds=0）。
+`POST /api/chat` 事件流：`step`(action/observation，时间线) → `sources`(来源卡片，带全局引用编号) → `delta`(正文 token) ｜ `reasoning`(思维链 token，独立通道) ｜ `approval_required`(M20 写审批卡片：approvalId/summary/filename/collection/expiresAt，前端渲染「批准入库/拒绝」按钮) → `usage`(轮次/token/耗时) → `done`(stopReason: normal/max_iter/abort/error/cache) ｜ `error`。`stopReason=cache` 表示命中回答缓存直接回放（usage 为原答用量，rounds=0）。
 
 ## MCP 接入（M13）
 
-知识库作为 MCP Server（`@modelcontextprotocol/sdk`），全部工具**只读**，ACL 与 Web 端同源（服务身份 = `MCP_ACCESS_USER` 指定的预置用户，未配置则仅 public）。
+知识库作为 MCP Server（`@modelcontextprotocol/sdk`），全部工具**只读**（M20 写工具仅暴露给 Web 端真实用户身份，MCP 服务身份无人审批故不破例），ACL 与 Web 端同源（服务身份 = `MCP_ACCESS_USER` 指定的预置用户，未配置则仅 public）。
 
 | 工具 | 说明 |
 |------|------|
@@ -164,7 +172,7 @@ npm run domain:sync                      # 手动同步 Vue 中文文档 → rag
 ## 回归与评估
 
 ```bash
-# 单元测试（node:test，39 例：ACL/MCP/parser）
+# 单元测试（node:test，57 例：ACL/MCP/parser/写能力 HITL）
 cd backend && npm test
 
 # M19 OCR 链路测试（零外部依赖：mock 视觉模型按图片尺寸返回固定转录）
@@ -210,13 +218,13 @@ M9 cross-encoder 实验结论（[reranker.js](backend/src/rag/reranker.js) + `re
 ## 目录
 
 ```
-backend/src/  server·config·auth·acl ｜ routes/(auth·chat·documents·sessions·debug·admin·health)
-              rag/(parser·chunker·embedder·tokenizer·qdrant·ingest·retriever·reranker·websearch·answer-cache)
-              agent/(graph·search-graph·tools·prompts·memory·injection) ｜ store/pg ｜ mcp/(mcp-server·stdio·http) ｜ obs/otel
+backend/src/  server·config·auth·acl ｜ routes/(auth·chat·documents·sessions·staging·approvals·debug·admin·health)
+              rag/(parser·chunker·embedder·tokenizer·qdrant·ingest·ingest-one·ocr·retriever·reranker·websearch·answer-cache)
+              agent/(graph·search-graph·tools·write·prompts·memory·injection) ｜ store/pg ｜ mcp/(mcp-server·stdio·http) ｜ obs/otel
               domain/(registry + api-docs 五件套：index·tools·chunker·prompts·connector·evals)  # M17 领域包
 frontend/src/ App ｜ components/(Login·ChatTab·DocsTab) ｜ api(token + SSE 解析)
 scripts/      regression.mjs（回归）· evaluate.mjs（评估，--suite 双轨）· backend/scripts/(mcp-smoke.mjs·domain-sync.mjs) · migrate-sqlite-to-pg.mjs（M11 迁移）
-evals/        golden-core.jsonl（core 62 题标注）· fixtures/（10 文档 + 版本组 sidecar）· results/（基线存档）；domain 轨随包：domain/api-docs/evals/
+evals/        golden-core.jsonl（core 65 题标注）· fixtures/（10 文档 + 版本组 sidecar）· results/（基线存档）；domain 轨随包：domain/api-docs/evals/
 .github/      workflows/ci.yml（回归 + 镜像构建）
 docs/         功能演进时间线.md
 ```

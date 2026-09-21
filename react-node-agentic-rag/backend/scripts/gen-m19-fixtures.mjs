@@ -17,7 +17,8 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..')
 const OUT = join(ROOT, 'evals/fixtures')
 mkdirSync(OUT, { recursive: true })
 
-const FONT = '26px "PingFang SC", sans-serif'
+// canvas 需用 GlobalFonts 可见的字体族（PingFang SC 不在 @napi-rs/canvas 字体表，会渲染豆腐块）
+const FONT = '26px "Hiragino Sans GB", "Songti SC", "Heiti TC", sans-serif'
 
 // 画布上写多行文本
 function drawLines(lines, width, height) {

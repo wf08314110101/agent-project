@@ -55,6 +55,7 @@ export const config = {
   ocr: {
     provider: env('OCR_PROVIDER', 'vlm'), // vlm（OpenAI 兼容视觉模型）| off
     model: env('OCR_MODEL', ''),          // 视觉模型名（如 qwen2.5-vl-72b-instruct）
+    fallbackModel: env('OCR_FALLBACK_MODEL', ''), // 主模型不可用（429 限流/网络等）时的降级模型；空 = 不降级
     baseUrl: env('OCR_BASE_URL', ''),     // 空 = 复用 LLM_BASE_URL（视觉模型常在另一家 provider，可独立指定）
     apiKey: env('OCR_API_KEY', ''),       // 空 = 复用 LLM_API_KEY
     maxPages: int('OCR_MAX_PAGES', 30),   // 扫描 PDF 单文档转录页数上限（成本闸，超出截断并标注）

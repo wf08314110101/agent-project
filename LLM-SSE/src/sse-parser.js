@@ -28,6 +28,7 @@ const DEFAULT_EVENT = 'message';
 export function createSSEDecoder(options = {}) {
   const decoder = new TextDecoder(options.encoding);
   let buffer = '';
+  let pendingCR = false; // 上一 chunk 末尾悬空的 "\r"，等下一块数据到来再判定
   let dataLines = [];
   let eventType = '';
   let lastEventId = options.lastEventId ?? '';
@@ -90,6 +91,15 @@ export function createSSEDecoder(options = {}) {
      */
     decode(chunk) {
       buffer += typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true });
+      // 末尾悬空的 "\r" 可能是 CRLF 的前半，先摘出来，避免被误判为行结束
+      if (pendingCR) {
+        buffer = '\r' + buffer;
+        pendingCR = false;
+      }
+      if (buffer.endsWith('\r')) {
+        buffer = buffer.slice(0, -1);
+        pendingCR = true;
+      }
       buffer = buffer.replace(/\r\n|\r/g, '\n');
 
       const messages = [];
@@ -107,6 +117,10 @@ export function createSSEDecoder(options = {}) {
     /** 流结束时冲刷残留：少数服务端最后一帧不以空行结尾 */
     flush() {
       buffer += decoder.decode(); // 冲刷 TextDecoder 内部可能残留的半个字符
+      if (pendingCR) {
+        buffer += '\r';
+        pendingCR = false;
+      }
       const frame = buffer.replace(/\r\n|\r/g, '\n');
       buffer = '';
       if (frame.trim() === '') return [];

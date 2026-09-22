@@ -42,7 +42,7 @@ export async function changedFiles(cwd) {
       path: line.slice(3).trim().replace(/^"|"$/g, ''),
       untracked: line.startsWith('??'),
     }))
-    .filter((f) => !f.path.startsWith('.aider') && f.path !== '.env')
+    .filter((f) => !f.path.startsWith('.aider') && f.path !== '.env' && !f.path.includes('node_modules'))
     .filter((f) => {
       if (!f.untracked) return true; // 已跟踪文件的改动总是有效
       try { return statSync(`${cwd}/${f.path}`).size > 0; } catch { return false; }

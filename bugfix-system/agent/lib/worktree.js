@@ -33,7 +33,7 @@ async function defaultBranch(root) {
 
 // 创建（或复用）worktree，强制回到基线后返回 { dir, baseSha, branch }
 // 分支被旧 worktree 占用时自动换新分支名（-a<attempt> 后缀）
-export async function ensureWorktree(batchId, branch, attempt = 0) {
+export async function ensureWorktree(batchId, branch, attempt = 0, relPath = '') {
   const dir = worktreeDir(batchId, attempt);
   if (!existsSync(path.join(dir, '.git'))) {
     let created = false;
@@ -67,17 +67,18 @@ export async function ensureWorktree(batchId, branch, attempt = 0) {
   await git(dir, 'reset', '--hard', baseSha);
   await git(dir, 'clean', '-fdx');
   writeFileSync(markerPath(batchId, attempt), JSON.stringify({ baseSha, branch }));
-  await symlinkNodeModules(dir);
+  await symlinkNodeModules(dir, relPath);
   const actualBranch = await git(dir, 'rev-parse', '--abbrev-ref', 'HEAD').catch(() => branch);
   return { dir, baseSha, branch: actualBranch === 'HEAD' ? branch : actualBranch };
 }
 
 // 主仓库已安装的 node_modules 通过 symlink 复用，避免 worktree 内重装依赖
-async function symlinkNodeModules(wtDir) {
-  const candidates = ['node_modules', 'backend/node_modules', 'frontend/node_modules'];
+// relPath 为项目相对父仓库路径（依赖在各子项目下，如 react-node-agentic-rag/backend/node_modules）
+async function symlinkNodeModules(wtDir, relPath = '') {
+  const candidates = ['node_modules', 'backend/node_modules', 'frontend/node_modules', 'server/node_modules'];
   for (const rel of candidates) {
-    const src = path.join(cfg.mainRepoRoot, rel);
-    const dst = path.join(wtDir, rel);
+    const src = path.join(cfg.mainRepoRoot, relPath, rel);
+    const dst = path.join(wtDir, relPath, rel);
     if (existsSync(src) && !existsSync(dst)) {
       try { symlinkSync(src, dst); } catch { /* 竞态忽略 */ }
     }

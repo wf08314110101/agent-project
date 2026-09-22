@@ -8,6 +8,7 @@ import { api } from './lib/api.js';
 import { git, changedFiles } from './lib/git.js';
 import { ensureWorktree, removeWorktree, sweepWorktrees, worktreeDir } from './lib/worktree.js';
 import { runAider, parseResultJson } from './lib/aider.js';
+import { locateFiles } from './lib/locate.js';
 import { describeImage } from './lib/vision.js';
 
 const run = promisify(execFile);
@@ -56,10 +57,10 @@ async function runBatch(claim) {
   const traces = [];
   const fixes = [];
   const heartbeat = setInterval(() => {
-    api.heartbeat(batch.id).catch(() => {});
+    api.heartbeat(batch.id).catch(() => { });
   }, 60_000);
   try {
-    const wt = await ensureWorktree(batch.id, batch.branch, batch.attempts || 1);
+    const wt = await ensureWorktree(batch.id, batch.branch, batch.attempts || 1, project.rel_path);
     const { dir: wtDir, baseSha } = wt;
     traces.push({ step: 'worktree', payload: { dir: wtDir, baseSha, branch: wt.branch } });
 
@@ -84,6 +85,12 @@ async function runBatch(claim) {
       // 修复 → 提交 → 回归测试；失败则带测试输出重试（amend 保持每 BUG 单 commit）
       const projDir = path.join(wtDir, project.rel_path);
       const prompt = buildPrompt(bug, imageDescs);
+      // 关键词定位候选文件预置进 aider 对话（repo-map 经常漏掉前端/小众文件）
+      const hintFiles = await locateFiles(projDir, `${bug.title}\n${bug.description || ''}`);
+      traces.push({ step: 'locate', payload: { bug_id: bug.id, files: hintFiles } });
+      const promptHint = hintFiles.length
+        ? `\n\n已为你预置打开的相关文件（如需其他文件请直接说明路径）:\n${hintFiles.join('\n')}`
+        : '';
       const MAX_RETRY = 2;
       let committed = false, files = [], parsed = {}, testResult = '';
       for (let attempt = 0; attempt <= MAX_RETRY; attempt++) {
@@ -91,7 +98,7 @@ async function runBatch(claim) {
           : `\n\n注意：你上一轮没有产出有效修复（没有代码改动，或改动未通过回归测试）。请直接给出 *SEARCH/REPLACE* 修复代码，不要只提问题或请求。上一轮回归测试输出:\n${testResult || '（无，本轮未执行到测试）'}`;
         let aiderOut;
         try {
-          aiderOut = await runAider(projDir, prompt + feedback, cfg.bugTimeoutSec * 1000);
+          aiderOut = await runAider(projDir, prompt + promptHint + feedback, cfg.bugTimeoutSec * 1000, hintFiles);
         } catch (e) {
           traces.push({ step: 'aider_error', payload: { bug_id: bug.id, attempt, err: e.message } });
           break;
@@ -167,7 +174,7 @@ async function runBatch(claim) {
     log(`批次 #${batch.id} 上报完成: ${fixes.length} 个修复, 回归测试 ${testFailed ? '未通过' : '通过'}`);
   } catch (e) {
     console.error(`[agent] 批次 #${batch.id} 异常:`, e.message);
-    await api.report({ batch_id: batch.id, ok: false, error: e.message, branch: batch.branch, traces }).catch(() => {});
+    await api.report({ batch_id: batch.id, ok: false, error: e.message, branch: batch.branch, traces }).catch(() => { });
   } finally {
     clearInterval(heartbeat);
   }
@@ -191,7 +198,7 @@ async function processCommands() {
       log(`批次 #${cmd.batch_id} 已合并 → ${sha.slice(0, 8)}`);
     } catch (e) {
       try { await git(cfg.mainRepoRoot, 'merge', '--abort'); } catch { /* 无进行中的合并 */ }
-      await api.reportMerge({ batch_id: cmd.batch_id, success: false, error: e.message }).catch(() => {});
+      await api.reportMerge({ batch_id: cmd.batch_id, success: false, error: e.message }).catch(() => { });
       log(`批次 #${cmd.batch_id} 合并失败: ${e.message}`);
     }
   }

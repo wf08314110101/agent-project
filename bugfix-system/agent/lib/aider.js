@@ -11,10 +11,11 @@ function aiderBin() {
   return 'aider';
 }
 
-// 在 worktree 内驱动 aider 修复，返回模型输出文本
-export function runAider(cwd, prompt, timeoutMs) {
+// 在 worktree 内驱动 aider 修复，返回模型输出文本；files 为预置进对话的相关文件
+export function runAider(cwd, prompt, timeoutMs, files = []) {
   return new Promise((resolve, reject) => {
     const args = [
+      ...files.filter((f) => !f.startsWith('-')),
       '--model', cfg.aiderModel,
       '--edit-format', cfg.aiderEditFormat,
       '--message', prompt,

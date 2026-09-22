@@ -172,9 +172,13 @@ async function runBatch(claim) {
       traces,
     });
     log(`批次 #${batch.id} 上报完成: ${fixes.length} 个修复, 回归测试 ${testFailed ? '未通过' : '通过'}`);
+    // ok+0 修复 → 服务端必判 failed，无后续 merge，立即清理避免 IDE 残留未提交文件
+    if (!fixes.length) await removeWorktree(batch.id, { branch: wt.branch }).catch(() => { });
   } catch (e) {
     console.error(`[agent] 批次 #${batch.id} 异常:`, e.message);
     await api.report({ batch_id: batch.id, ok: false, error: e.message, branch: batch.branch, traces }).catch(() => { });
+    // 异常批次同样终态清理；服务端重试时 attempts+1 会建新后缀目录
+    await removeWorktree(batch.id, { branch: batch.branch }).catch(() => { });
   } finally {
     clearInterval(heartbeat);
   }

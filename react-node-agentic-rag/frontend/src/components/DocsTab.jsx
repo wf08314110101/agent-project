@@ -274,12 +274,18 @@ export default function DocsTab({ user, onAsk }) {
             </div>
             <div className="editor-row">
               <label>密级</label>
-              <select
-                value={editing.classification}
-                onChange={(e) => setEditing({ ...editing, classification: e.target.value })}
-              >
-                {CLASSIFICATIONS.map((c) => <option key={c} value={c}>{CLS_META[c].text}</option>)}
-              </select>
+              <div className="tag-picker">
+                {CLASSIFICATIONS.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    className={`tag-chip ${editing.classification === c ? 'on' : ''}`}
+                    onClick={() => setEditing({ ...editing, classification: c })}
+                  >
+                    {CLS_META[c].text}
+                  </button>
+                ))}
+              </div>
               <span className="hint">
                 {editing.classification === 'public' && '全体登录用户可读'}
                 {editing.classification === 'dept' && '与归属人同部门可读'}

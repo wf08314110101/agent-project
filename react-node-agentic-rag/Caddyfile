@@ -1,0 +1,22 @@
+# 网关配置：80/443 唯一公网入口
+# 把 rag.example.com 换成实际域名；本机测试可改成 :80
+rag.example.com {
+	# API（含聊天 SSE）直达 backend，多实例轮询 + 主动健康检查
+	# 注意：/api/health 同时是下面的探活端点，不是面向用户的业务路径
+	reverse_proxy /api/* backend:8788 {
+		health_uri /api/health
+		health_interval 10s
+		health_timeout 3s
+
+		# SSE 必需：逐字节推送，不缓冲
+		flush_interval -1
+		transport http {
+			read_timeout 300s
+			write_timeout 300s
+		}
+	}
+
+	# 其余一切（静态资源 + SPA 深链路由，如 /documents/123）交给 frontend，
+	# 由其 nginx 的 try_files $uri /index.html 兜底
+	reverse_proxy /* frontend:80
+}

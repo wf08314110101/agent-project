@@ -1,0 +1,125 @@
+# 生产编排（方案A：caddy 作为唯一公网入口）与 docker-compose.yml 的差异
+#   1. backend 去掉 container_name，支持 docker compose --scale backend=N 多实例
+#   2. qdrant/postgres/redis/phoenix 不再发布宿主机端口，只在 compose 网络内可达
+#   3. frontend 不再发布 8080，纯内网静态服务，流量一律经 caddy 进入
+#   4. caddy 发布 80/443，对 backend:8788 做带健康检查的负载均衡
+#
+# 常用命令：
+#   docker compose -f docker-compose.prod.yml up -d --scale backend=3
+#   docker compose -f docker-compose.prod.yml logs -f backend
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: agentic-rag-qdrant
+    # 生产不发布 6333/6334，仅 compose 网络内访问；需要看 dashboard 用 ssh -L 转发
+    volumes: ["qdrant_data:/qdrant/storage"]
+    restart: always
+    logging: &default_logging
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # M5 健康检查：backend 依赖其就绪后才启动（/readyz 表示可服务）
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':<>/dev/tcp/127.0.0.1/6333'"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: agentic-rag-postgres
+    environment:
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: rag123 # 生产请改强密码，并同步 DATABASE_URL
+      POSTGRES_DB: rag
+    volumes: ["pg_data:/var/lib/postgresql/data"]
+    restart: always
+    logging: *default_logging
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag -d rag"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # M12 多实例共享态：限流计数 + 摄取事件广播（pub/sub）
+  redis:
+    image: redis:7-alpine
+    container_name: agentic-rag-redis
+    restart: always
+    logging: *default_logging
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: agentic-rag-phoenix
+    # 生产不发布 6006，需要看 UI 用 ssh -L 6006:phoenix:6006
+    volumes: ["phoenix_data:/mnt/data"]
+    restart: always
+    logging: *default_logging
+
+  # 应用后端：无 container_name，可 --scale 横向扩容
+  # 多实例前提（已满足）：无状态 JWT + Redis 共享限流/pub-sub + 缓存 epoch 失效
+  backend:
+    build: ./backend
+    env_file: ./backend/.env # 生产必须显式配置 JWT_SECRET，各实例共用同一密钥
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      DATABASE_URL: postgres://rag:rag123@postgres:5432/rag
+      REDIS_URL: redis://redis:6379
+      PHOENIX_ENDPOINT: http://phoenix:6006/v1/traces
+    volumes:
+      - ./backend/data:/app/data # 嵌入模型缓存 + uploads 原件，单机多实例共享 bind mount
+    # M5 健康检查：node 原生 fetch 探活 /api/health（含 Qdrant 连通性）
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:8788/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: always
+    logging: *default_logging
+
+  # 应用前端：nginx 托管 dist，纯内网服务，不再发布端口，流量一律经 caddy 进入
+  frontend:
+    build: ./frontend
+    container_name: agentic-rag-frontend
+    depends_on:
+      backend:
+        condition: service_healthy # 前端反代的目标必须先就绪
+    restart: always
+    logging: *default_logging
+
+  # 网关：唯一公网入口（80/443），对 backend:8788 做带健康检查的 LB，静态资源反代 frontend:80
+  # 需同目录存在 Caddyfile
+  caddy:
+    image: caddy:2-alpine
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: always
+    logging: *default_logging
+
+volumes:
+  qdrant_data:
+  phoenix_data:
+  pg_data:
+  caddy_data:
+  caddy_config:

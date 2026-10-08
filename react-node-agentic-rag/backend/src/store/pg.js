@@ -192,7 +192,10 @@ export async function insertDoc(id, filename, size, hash, chunks, status, error,
 export async function listDocsVisible(userId, dept) {
   return (
     await q(
-      `SELECT d.*, u.username AS owner_name, u.dept AS owner_dept
+      `SELECT d.*, u.username AS owner_name, u.dept AS owner_dept,
+              (SELECT COALESCE(json_agg(gu.username ORDER BY gu.username), '[]'::json)
+                 FROM doc_grants dg LEFT JOIN users gu ON gu.id = dg.user_id
+                WHERE dg.doc_id = d.id) AS grants
        FROM documents d LEFT JOIN users u ON u.id = d.user_id
        WHERE d.user_id = $1
           OR d.classification = 'public'
@@ -206,10 +209,13 @@ export async function listDocsVisible(userId, dept) {
 export async function listDocsAll() {
   return (
     await q(
-      `SELECT d.*, u.username AS owner_name, u.dept AS owner_dept
+      `SELECT d.*, u.username AS owner_name, u.dept AS owner_dept,
+              (SELECT COALESCE(json_agg(gu.username ORDER BY gu.username), '[]'::json)
+                 FROM doc_grants dg LEFT JOIN users gu ON gu.id = dg.user_id
+                WHERE dg.doc_id = d.id) AS grants
        FROM documents d LEFT JOIN users u ON u.id = d.user_id
-       ORDER BY d.created_at DESC`
-    )
+       ORDER BY d.created_at DESC`,
+      [])
   ).rows
 }
 export async function updateDocMeta(classification, tags, id) {

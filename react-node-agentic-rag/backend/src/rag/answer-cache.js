@@ -70,9 +70,12 @@ export async function getAnswer(key) {
   return e.v
 }
 
-/** 写缓存：值必须可 JSON 序列化；TTL 到期自动失效 */
+/** 写缓存：值必须可 JSON 序列化；TTL 到期自动失效。
+ *  空 sources（无引用支撑的兜底直答）不入缓存：它只代表"该用户当下视野内无资料"，
+ *  授权/密级放宽/新资料上传后视野会变，缓存它会脏读（视野扩大后仍回放旧兜底答案）。 */
 export async function setAnswer(key, val) {
   if (!ttlSec()) return
+  if (!val?.sources?.length) return
   if (redis) {
     try { await redis.set(ANS_PREFIX + key, JSON.stringify(val), 'EX', ttlSec()) } catch { }
     return

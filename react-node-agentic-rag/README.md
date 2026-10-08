@@ -13,7 +13,8 @@ React 5174 ──SSE── Fastify 8788 ──┬── DeepSeek (LLM, 工具调
                                    │      └─ search_kb 子图: retrieve → grade → rewrite
                                    ├── Qdrant 6333 (向量) ←─ 嵌入: 本地 bge ONNX ｜ 远程 /embeddings (EMBED_PROVIDER)
                                    ├── Postgres 5432 (文档/会话/消息) ｜ Redis 6379 (可选，多实例共享态)
-                                   └── MCP Server (M13) ←─ Cursor / Claude Code / Trae 等客户端直连检索
+                                   ├── MCP Server (M13) ←─ Cursor / Claude Code / Trae 等客户端直连检索
+                                   └── 飞书机器人 (M22) ←─ 企业 IM 私聊/群 @ 问答（长连接模式，免公网回调）
 观测: OTel 单管道双导出 → Langfuse 云端 ｜ Phoenix (PHOENIX_ENABLED=true)
 ```
 
@@ -22,7 +23,7 @@ React 5174 ──SSE── Fastify 8788 ──┬── DeepSeek (LLM, 工具调
 - **摄取队列**：上传即 202 入队，worker 后台解析→切块→嵌入（分批上报进度%），SSE 实时推送状态（断线自动回退轮询）；同内容 hash 去重；宕机自恢复
 - **混合检索**：稠密（bge 语义）+ 稀疏（jieba 分词 BM25）双路 Qdrant 服务端 RRF 融合，关键词/专名查询不丢召回
 - **Agentic 检索**：多查询并发检索 + LLM 逐条相关性评估（结果缓存）+ 材料不足自动改写重检（CRAG，有界 2 次）；可选首跳查询改写（`QUERY_REWRITE=on`，检索前先优化查询，不计入重试额度）
-- **回答缓存（M15）**：同问题 + 同可见资料（KB 纪元）+ 同 ACL 指纹命中直接 SSE 回放（`stopReason=cache`，先落库再回放），省检索/评估/LLM 全链路；文档增删、密级授权变更纪元 +1 全量失效，杜绝脏读；Redis 共享多实例，`ANSWER_CACHE_TTL_SEC=0` 关闭
+- **回答缓存（M15/M22）**：同问题 + 同可见资料（KB 纪元）+ 同 ACL 指纹命中直接回放（Web `stopReason=cache` SSE 回放，飞书卡片秒回，跨渠道共享），省检索/评估/LLM 全链路；文档增删、密级授权变更纪元 +1 全量失效，杜绝脏读；**空 sources 的兜底直答不入缓存**（兜底只代表"该用户当下视野内无资料"，授权/新资料后视野扩大，缓存必脏读）；Redis 共享多实例，`ANSWER_CACHE_TTL_SEC=0` 关闭
 - **工具调用**：search_knowledge / calculator / get_current_time；参数 schema 校验门、同参重复调用检测、同批多工具并行执行；超 6 轮强制直答防死循环
 - **引用锚点**：检索块全局唯一编号，回答行内 [n] 可点击跳转对应来源卡片；指定文档问答（DocsTab「提问」→ 仅在该文档范围、按其所属集合定向检索）
 - **文档预览（M17）**：摄取原件保留（不再处理完即删），`GET /api/documents/:id/content` 原样回传（canReadDoc 鉴权，pdf 浏览器原生渲染，文本类 text/plain，html 不 inline 防 XSS），前端点文件名新标签页预览
@@ -30,6 +31,7 @@ React 5174 ──SSE── Fastify 8788 ──┬── DeepSeek (LLM, 工具调
 - **多格式摄取与 OCR（M19）**：parser 重构为注册表（`registerParser(ext, fn)`，与 chunker/prompt 注册同风格）。新增：①**扫描件 PDF**——pdfjs-dist 文本层字符密度判扫描（<100 字/页）→ 逐页渲染 PNG（@napi-rs/canvas）→ 视觉大模型转录（页间拼 `## 第 N 页`）；②**图片直传** png/jpg/jpeg/webp → VLM 转录（截图/表格/票据）；③**docx 升级**——mammoth convertToHtml 保标题/表格结构（标题→井号、单元格→` | `）+ 内嵌图 OCR 行内 `【图：…】`；④**zip 包**——路由层解压（yauzl）每 entry 独立入队（filename=包内路径，202 返回 `{docs:[...]}`，单文件 `{doc}` 不变），防 zip bomb（≤100 文件/100MB/不递归嵌套）+ 中文文件名解码修复（UTF-8 严格优先回退 latin1）。OCR 走 OpenAI 兼容视觉模型（`OCR_MODEL` 未配自动降级：扫描件仅文本层、图片跳过，不阻断；`OCR_BASE_URL/OCR_API_KEY` 缺省复用 LLM 配置；`OCR_MAX_PAGES=30` 成本闸）；转录提示词只约束「逐字原文」防语料失真；测试配套 `scripts/mock-vlm.mjs`（按图片尺寸返回固定转录，零外部依赖）+ `scripts/gen-m19-fixtures.mjs`（脚本生成扫描 PDF/含图 docx/表格截图）
 - **Agent 写能力与人工审批（M20）**：`submit_document` 写工具（提交/替换知识库文档，复用上传摄取管线）+ 安全三件套同批落地——①**幂等键**（服务端规范键 `sha256(user|collection|docKey|contentHash)`，approvals 部分唯一索引兜底，重复提交拿同一张单/已执行结论）；②**写权限**（`canWriteDoc` 单点：新建任意 owner，替换他人版本组须 owner/admin；目标集合白名单）；③**两段式人工审批**（HITL）：toolsNode 拦截写工具不执行 → 落 approvals 表 → SSE `approval_required` 弹确认卡片 → 本轮以「等待审批」收尾 → 用户批准 → confirm 执行 → 前端自动续答报告入库结果。对话内📎上传先暂存（`POST /api/staging`），批准前写入不生效；审批单/暂存同 TTL（`APPROVAL_TIMEOUT_SEC=900`）定时清扫；审计：`rag.write_action` span 属性 + 审批单落库（who/what/result/decided_at）。`WRITE_TOOLS=false`（默认）时写工具不进工具表，M16「工具全只读」零破坏面原样保留；MCP 维持只读不破例
 - **第二领域包 company-policy（M21）**：制度文档包，验证五件套模式可复制性 + 给 M20 写闭环真实演示场景（对话上传新制度 → 审批 → 旧版自动版本化替换 → 问答按版本取舍）。与 api-docs 差异——**五件套可裁剪**：无领域工具/无连接器（制度语料经上传/写工具进入），只保留集合归属 + 切分策略 + 提示片段 + 词表；**条款式切分器**按「第X章/第X条」切条（条为原子单位 + 章边界强制分块，300 字/块调参：制度单条很短，整包塞多条会稀释单条事实的嵌入信号）；提示片段带条款号逐字引用/版本取舍/已废止声明/写入指引（collection=包集合、docKey=policy/<主题>——E2E 实测无指引模型写入默认落 core）；语料 6 份 fixture（考勤 v1/v2 版本对 + deprecated）+ 12 题评测（retrieval recall@5=1.0 / answer 全满分）；`scripts/seed-domain.mjs` 播种脚本，evaluate.mjs domain 轨随 `DOMAIN_PACKS` 参数化；顺带修复 multipart 尾随字段偶发丢失（`req.file()`+`toBuffer()` 竞态 → 逐 part 消费）
+- **飞书机器人渠道（M22）**：与 Web（HTTP+SSE）、MCP 并列的**第三个入口**——`@larksuiteoapi/node-sdk` WSClient **长连接模式**（免公网回调，本地/内网可跑），`FEISHU_ENABLED=true` 且 appId/secret 齐全才启动（server.js 挂载，优雅退出断连）；**同源零第二套逻辑**：runAgent/ACL/提示词/工具表与 Web 同一套，检索前过滤同源；**身份映射**：通讯录邮箱/手机号 ↔ `users.username`（手机号剥 `+86` 归一比较），兜底 `FEISHU_USER_MAP=openId:用户名`，10 分钟进程缓存，未绑定回提示语不耗 token；私聊直答、群聊需 @机器人（启动拉一次 bot open_id，SDK 未封装走裸 REST `/open-apis/bot/v3/info`）；**聚合回复**：攒完 sources + 最终答案一次回互动卡片（markdown 正文 + 来源列表，9k 字符截断）；防抖三件套：message_id LRU 去重（事件重推不重复消耗）、每 chat 串行（上一条未答完回提示不并发）、非 user sender 忽略；**回答缓存跨渠道共享**：同问题网页端答过飞书端秒回（同键语义），文档增删/授权变更纪元 bump 两渠道同时失效，空 sources 兜底直答不入缓存；会话按 `openId+chatId` 确定性派生落库，网页端 /api/sessions 可回放（meta 标 `channel:'feishu'`）
 - **会话**：多轮上下文（超窗滚动摘要压缩，seq 断点零丢失）、消息+步骤+来源持久化回放、会话增删
 - **思维链通道**：reasoning token 走独立 SSE 事件（deepseek-reasoner 等模型自动生效），前端折叠面板展示，不与正文混流
 - **鉴权**：预置用户 + JWT 登录（scrypt 存储密码），会话/文档按用户隔离；登录接口单独限流
@@ -80,6 +82,8 @@ docker compose up -d backend frontend
 | `JWT_ACCESS_TTL` / `JWT_REFRESH_DAYS` | 15m / 30 | access 短效期（M14 无状态校验）/ refresh 有效期天数（单活旋转） |
 | `AUTH_USERS` | - | 预置用户 `用户名:密码[:角色[:部门]]`（M10），角色 member/admin；启动播种（不配则无人能登录） |
 | `MCP_ENABLED` / `MCP_ACCESS_USER` / `MCP_HTTP_TOKEN` | true / - / - | MCP Server（M13）：服务身份用户名（空 = 仅 public 匿名）/ 非空才挂 `POST /mcp`（Bearer）；stdio 入口不受这两项控制 |
+| `FEISHU_ENABLED` / `FEISHU_APP_ID` / `FEISHU_APP_SECRET` | false / - / - | 飞书机器人（M22，长连接模式）：三项齐全才启动 WSClient；开放平台需开通机器人能力 + 长连接订阅 `im.message.receive_v1` + 发布版本；权限：`im:message(:send_as_bot)` + `contact:user.base/email/phone:readonly` |
+| `FEISHU_USER_MAP` | - | 兜底身份映射 `openId:用户名`（逗号分隔；通讯录邮箱/手机号匹配不上 `users.username` 时手工绑定） |
 | `DOMAIN_PACKS` | 空 | 领域包单激活（M17，当前可选 `api-docs` / `company-policy`）：主检索集合切 `rag_<pack>`、标签词表/切分策略/提示片段由包注入、上传接受 `collection=rag_<pack>`；company-policy 语料经 `node scripts/seed-domain.mjs` 播种；留空 = 纯 core 零破坏 |
 | `DOC_REPLACE_MODE` | `auto` | 版本化替换（M18）：同 docKey 重传内容变化时删旧插新（version+1）。`off`=不替换新旧共存 ｜ `on`=全集合替换 ｜ `auto`=core 关、领域集合开 |
 | `DEPRECATED_PENALTY` | `0.3` | deprecated 文档命中融合分乘数（M18，降权非硬滤——明确问旧版仍可召回；1 = 不降权） |
@@ -156,6 +160,17 @@ curl -X POST http://localhost:8788/mcp \
 
 冒烟验证：`node backend/scripts/mcp-smoke.mjs stdio`（或 `http`，需 8790 端口实例带 token；模拟 SDK Client 完整握手 + 4 工具 + resources）。
 
+## 飞书机器人接入（M22）
+
+企业自建应用 + 机器人能力 + **长连接**订阅（免公网回调），`FEISHU_ENABLED=true` 且凭证齐全后端启动时自动建连：
+
+1. [开放平台](https://open.feishu.cn/app) 创建企业自建应用 → 应用能力添加「机器人」
+2. 权限管理开通：`im:message`、`im:message:send_as_bot`、`contact:user.base:readonly`、`contact:user.email:readonly`、`contact:user.phone:readonly`（**改权限须重新发布版本才生效**；通讯录未返回 email/mobile 时该字段静默为空，服务端有诊断日志）
+3. 事件与回调 → 订阅方式选「长连接」→ 订阅 `im.message.receive_v1` → 创建版本发布（可用范围先设仅自己）
+4. `backend/.env` 配 `FEISHU_ENABLED=true` + `FEISHU_APP_ID/FEISHU_APP_SECRET`，重启看日志 `[feishu] 长连接已建立（im.message.receive_v1）`
+
+交互：私聊直接提问，群聊需 @机器人（v1 仅文本消息）；身份 = 通讯录邮箱/手机号 ↔ `users.username`（手机号剥 `+86`），匹配不上配 `FEISHU_USER_MAP=openId:用户名`；回复为 Markdown 卡片（正文 + 来源列表）；回答缓存与 Web 端同键共享（`stopReason=cache` 秒回），消息落库网页端可回放。
+
 ## 领域模式（M17）
 
 ```bash
@@ -225,7 +240,7 @@ M9 cross-encoder 实验结论（[reranker.js](backend/src/rag/reranker.js) + `re
 ```
 backend/src/  server·config·auth·acl ｜ routes/(auth·chat·documents·sessions·staging·approvals·debug·admin·health)
               rag/(parser·chunker·embedder·tokenizer·qdrant·ingest·ingest-one·ocr·retriever·reranker·websearch·answer-cache)
-              agent/(graph·search-graph·tools·write·prompts·memory·injection) ｜ store/pg ｜ mcp/(mcp-server·stdio·http) ｜ obs/otel
+              agent/(graph·search-graph·tools·write·prompts·memory·injection) ｜ store/pg ｜ mcp/(mcp-server·stdio·http) ｜ feishu/bot ｜ obs/otel
               domain/(registry + api-docs 五件套：index·tools·chunker·prompts·connector·evals  # M17 领域包①
                      + company-policy 五件套裁剪版：index·chunker·prompts·meta·evals  # M21 领域包②，无工具/连接器)
 frontend/src/ App ｜ components/(Login·ChatTab·DocsTab) ｜ api(token + SSE 解析)

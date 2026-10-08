@@ -166,6 +166,15 @@ export const config = {
   docReplaceMode: env('DOC_REPLACE_MODE', 'auto'),   // off=不替换（新旧共存）| on=全替换 | auto=core 关、领域集合开
   deprecatedPenalty: Number(env('DEPRECATED_PENALTY', '0.3')), // deprecated 命中融合分乘数（1 = 不降权；降权非硬滤，保住"明确问旧版"的召回）
 
+  // ---- 飞书机器人入口（长连接模式）：enabled 且 appId/secret 齐全才启动 WSClient ----
+  feishu: {
+    enabled: env('FEISHU_ENABLED', 'false') === 'true',
+    appId: env('FEISHU_APP_ID', ''),
+    appSecret: env('FEISHU_APP_SECRET', ''),
+    // 兜底绑定：'openId:username,...'（通讯录邮箱/手机号匹配不上 users.username 时）
+    userMap: env('FEISHU_USER_MAP', ''),
+  },
+
   // ---- M20 写能力（Agent 写工具 + 幂等/审批/审计三件套）----
   // enabled=false 时写工具不进工具表（M16「工具全只读=无破坏面」前提不被破坏）
   write: {

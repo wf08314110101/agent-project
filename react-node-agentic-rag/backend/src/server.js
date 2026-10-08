@@ -36,6 +36,7 @@ import debugRoutes from './routes/debug.js'
 import adminRoutes from './routes/admin.js'
 import { initObs, flushObs } from './obs/otel.js'
 import mcpHttpPlugin from './mcp/http.js'
+import { startFeishuBot } from './feishu/bot.js'
 
 // 启动统一观测层：一次埋点按配置扇出（PHOENIX_ENABLED / LANGFUSE_* 三项）
 initObs()
@@ -124,6 +125,9 @@ if (config.mcp.enabled && config.mcp.httpToken) {
 const ingest = createIngestWorker(app.log)
 await ingest.start()
 
+// 飞书机器人（长连接）：FEISHU_ENABLED=true 且 appId/secret 齐全才启动；未启用返回 null
+const feishuBot = await startFeishuBot(app.log)
+
 // 启动即确保集合存在（幂等；Qdrant 未就绪不阻塞启动，上传时会再 ensure）
 // M17：core 集合 + 各激活领域包集合一次 ensure（领域包删除集合即随包下线）
 try {
@@ -142,6 +146,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     const force = setTimeout(() => process.exit(1), 10_000) // 兜底：优雅关闭 10s 未完成则强退
     try {
       await ingest.stop()              // 不再领取新摄取任务
+      await feishuBot?.stop()          // 断开飞书长连接
       for (const a of app.sseStreams) a.abort()
       await app.close()                // 等待在途请求收尾
       clearTimeout(force)

@@ -19,7 +19,7 @@ import rateLimit from '@fastify/rate-limit'
 import jwt from '@fastify/jwt'
 import Redis from 'ioredis'
 import { config } from './config.js'
-import { ensureCollection } from './rag/qdrant.js'
+import { ensureCollection, ensureMemoryCollection } from './rag/qdrant.js'
 import { createIngestWorker } from './rag/ingest.js'
 import { closeBus } from './rag/bus.js'
 import { seedUsers, initAuthCache, currentTokenVer } from './auth.js'
@@ -30,6 +30,7 @@ import authRoutes from './routes/auth.js'
 import documentRoutes from './routes/documents.js'
 import chatRoutes from './routes/chat.js'
 import sessionRoutes from './routes/sessions.js'
+import memoryRoutes from './routes/memories.js'
 import stagingRoutes from './routes/staging.js'
 import approvalRoutes from './routes/approvals.js'
 import debugRoutes from './routes/debug.js'
@@ -106,6 +107,7 @@ const protectedRoutes = async (api) => {
   api.addHook('preHandler', app.authenticate)
   api.register(documentRoutes)  // 文档上传 / 列表 / 删除 / 密级标签授权
   api.register(sessionRoutes)   // 会话列表 / 消息回放 / 删除
+  api.register(memoryRoutes)    // M23 用户长期记忆自助管理（查看 / 删除）
   api.register(chatRoutes)      // POST /api/chat            SSE 流式问答（核心）
   api.register(stagingRoutes)   // M20 对话内暂存上传（写工具数据源）
   api.register(approvalRoutes)  // M20 写审批：确认执行 / 拒绝 / 查询
@@ -133,6 +135,8 @@ const feishuBot = await startFeishuBot(app.log)
 try {
   await ensureCollection()
   for (const p of packs) await ensureCollection({ collection: p.collection })
+  // M23 用户长期记忆集合（USER_MEMORY=false 时跳过，保持零破坏面）
+  if (config.memory.user.enabled) await ensureMemoryCollection()
 } catch (e) {
   app.log.warn(`[qdrant] 启动检查失败: ${e.message}`)
 }

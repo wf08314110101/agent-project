@@ -32,6 +32,7 @@ React 5174 ──SSE── Fastify 8788 ──┬── DeepSeek (LLM, 工具调
 - **Agent 写能力与人工审批（M20）**：`submit_document` 写工具（提交/替换知识库文档，复用上传摄取管线）+ 安全三件套同批落地——①**幂等键**（服务端规范键 `sha256(user|collection|docKey|contentHash)`，approvals 部分唯一索引兜底，重复提交拿同一张单/已执行结论）；②**写权限**（`canWriteDoc` 单点：新建任意 owner，替换他人版本组须 owner/admin；目标集合白名单）；③**两段式人工审批**（HITL）：toolsNode 拦截写工具不执行 → 落 approvals 表 → SSE `approval_required` 弹确认卡片 → 本轮以「等待审批」收尾 → 用户批准 → confirm 执行 → 前端自动续答报告入库结果。对话内📎上传先暂存（`POST /api/staging`），批准前写入不生效；审批单/暂存同 TTL（`APPROVAL_TIMEOUT_SEC=900`）定时清扫；审计：`rag.write_action` span 属性 + 审批单落库（who/what/result/decided_at）。`WRITE_TOOLS=false`（默认）时写工具不进工具表，M16「工具全只读」零破坏面原样保留；MCP 维持只读不破例
 - **第二领域包 company-policy（M21）**：制度文档包，验证五件套模式可复制性 + 给 M20 写闭环真实演示场景（对话上传新制度 → 审批 → 旧版自动版本化替换 → 问答按版本取舍）。与 api-docs 差异——**五件套可裁剪**：无领域工具/无连接器（制度语料经上传/写工具进入），只保留集合归属 + 切分策略 + 提示片段 + 词表；**条款式切分器**按「第X章/第X条」切条（条为原子单位 + 章边界强制分块，300 字/块调参：制度单条很短，整包塞多条会稀释单条事实的嵌入信号）；提示片段带条款号逐字引用/版本取舍/已废止声明/写入指引（collection=包集合、docKey=policy/<主题>——E2E 实测无指引模型写入默认落 core）；语料 6 份 fixture（考勤 v1/v2 版本对 + deprecated）+ 12 题评测（retrieval recall@5=1.0 / answer 全满分）；`scripts/seed-domain.mjs` 播种脚本，evaluate.mjs domain 轨随 `DOMAIN_PACKS` 参数化；顺带修复 multipart 尾随字段偶发丢失（`req.file()`+`toBuffer()` 竞态 → 逐 part 消费）
 - **飞书机器人渠道（M22）**：与 Web（HTTP+SSE）、MCP 并列的**第三个入口**——`@larksuiteoapi/node-sdk` WSClient **长连接模式**（免公网回调，本地/内网可跑），`FEISHU_ENABLED=true` 且 appId/secret 齐全才启动（server.js 挂载，优雅退出断连）；**同源零第二套逻辑**：runAgent/ACL/提示词/工具表与 Web 同一套，检索前过滤同源；**身份映射**：通讯录邮箱/手机号 ↔ `users.username`（手机号剥 `+86` 归一比较），兜底 `FEISHU_USER_MAP=openId:用户名`，10 分钟进程缓存，未绑定回提示语不耗 token；私聊直答、群聊需 @机器人（启动拉一次 bot open_id，SDK 未封装走裸 REST `/open-apis/bot/v3/info`）；**聚合回复**：攒完 sources + 最终答案一次回互动卡片（markdown 正文 + 来源列表，9k 字符截断）；防抖三件套：message_id LRU 去重（事件重推不重复消耗）、每 chat 串行（上一条未答完回提示不并发）、非 user sender 忽略；**回答缓存跨渠道共享**：同问题网页端答过飞书端秒回（同键语义），文档增删/授权变更纪元 bump 两渠道同时失效，空 sources 兜底直答不入缓存；会话按 `openId+chatId` 确定性派生落库，网页端 /api/sessions 可回放（meta 标 `channel:'feishu'`）
+- **分层记忆（M23）**：L0 窗口原文 / L1 会话滚动摘要（M4）之上补齐 **L2 用户长期记忆**（跨会话，user 维度）——**蒸馏写入**：未蒸馏消息攒批 ≥20 条触发 LLM 结构化蒸馏（`add/update/delete/noop` ops，冲突靠改写不追加，`distilled_seq` 水位幂等——失败不推进下轮自动重蒸），记忆落 pg（type/confidence/hits/source 溯源，事实源）+ Qdrant 独立集合（纯稠密、point id=记忆 UUID 幂等覆盖、userId payload 服务端过滤隔离）；**召回注入**：每轮提问按题向量检索 topK → pg 校验 active → 800 字符预算截断 → `fenceUntrusted` 定界注入（system 之后、会话摘要之前），命中 hits+1 观测；**自助管理**：`GET/DELETE /api/memories` 查看与遗忘（软删留痕 + 向量同步）；`USER_MEMORY=false` 全关零破坏面
 - **会话**：多轮上下文（超窗滚动摘要压缩，seq 断点零丢失）、消息+步骤+来源持久化回放、会话增删
 - **思维链通道**：reasoning token 走独立 SSE 事件（deepseek-reasoner 等模型自动生效），前端折叠面板展示，不与正文混流
 - **鉴权**：预置用户 + JWT 登录（scrypt 存储密码），会话/文档按用户隔离；登录接口单独限流
@@ -78,6 +79,8 @@ docker compose up -d backend frontend
 | `RATE_LIMIT_MAX` / `CHAT_RATE_LIMIT_MAX` | 120 / 20 | 每分钟限流 |
 | `FALLBACK_DIRECT` | true | 知识库为空时通用知识直答（注明） |
 | `MEMORY_WINDOW` | 20 | 会话窗口条数（更早消息滚动摘要压缩） |
+| `USER_MEMORY` / `MEMORY_DISTILL_BATCH` | true / 20 | 用户长期记忆（M23）总开关 / 蒸馏攒批条数（未蒸馏消息攒够才触发 LLM 蒸馏，单批上限 60） |
+| `MEMORY_RECALL_TOPK` / `MEMORY_MIN_SCORE` / `MEMORY_BUDGET_CHARS` / `MEMORY_COLLECTION` | 4 / 0.35 / 800 / user_memories | 记忆召回（M23）：每轮召回条数 / 余弦阈值 / 注入预算字符 / Qdrant 记忆集合名 |
 | `JWT_SECRET` | dev-insecure-secret | JWT 签名密钥，生产必须改随机长串 |
 | `JWT_ACCESS_TTL` / `JWT_REFRESH_DAYS` | 15m / 30 | access 短效期（M14 无状态校验）/ refresh 有效期天数（单活旋转） |
 | `AUTH_USERS` | - | 预置用户 `用户名:密码[:角色[:部门]]`（M10），角色 member/admin；启动播种（不配则无人能登录） |
@@ -116,6 +119,8 @@ docker compose up -d backend frontend
 | POST | `/api/approvals/:id/confirm` | 批准并执行写操作（M20）：校验归属/状态/有效期 → 读暂存 → ingestOne → 结果回填；执行失败 422 |
 | POST | `/api/approvals/:id/reject` | 拒绝写操作（M20）；已处理 409，仅本人 |
 | GET | `/api/sessions` · `/:id/messages` · DELETE | 会话管理（按用户隔离，他人会话 404） |
+| GET | `/api/memories` | 本人长期记忆列表（M23，不含已删除） |
+| DELETE | `/api/memories/:id` | 遗忘单条记忆（M23）：软删留痕 + Qdrant 向量同步；他人记忆 404 |
 | GET | `/api/debug/retrieval?q=&topK=` | 裸检索观测（评估数据源/调参用），受 ACL 约束；带 docId 按文档所属集合定向 |
 | GET | `/api/meta` | 公开元信息：当前生效标签词表（随领域包注入变化） |
 | GET | `/api/admin/users` · PATCH `/:id` | 用户列表 / 调整角色部门（admin only） |
@@ -238,7 +243,7 @@ M9 cross-encoder 实验结论（[reranker.js](backend/src/rag/reranker.js) + `re
 ## 目录
 
 ```
-backend/src/  server·config·auth·acl ｜ routes/(auth·chat·documents·sessions·staging·approvals·debug·admin·health)
+backend/src/  server·config·auth·acl ｜ routes/(auth·chat·documents·sessions·memories·staging·approvals·debug·admin·health)
               rag/(parser·chunker·embedder·tokenizer·qdrant·ingest·ingest-one·ocr·retriever·reranker·websearch·answer-cache)
               agent/(graph·search-graph·tools·write·prompts·memory·injection) ｜ store/pg ｜ mcp/(mcp-server·stdio·http) ｜ feishu/bot ｜ obs/otel
               domain/(registry + api-docs 五件套：index·tools·chunker·prompts·connector·evals  # M17 领域包①

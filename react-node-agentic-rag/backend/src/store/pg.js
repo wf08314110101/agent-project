@@ -113,6 +113,23 @@ CREATE TABLE IF NOT EXISTS staging_files (
   path       TEXT NOT NULL,                    -- 落盘路径 uploads/staging/<id>.<ext>
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- M23 分层记忆 L2：用户长期记忆（跨会话蒸馏；pg 为事实源，向量在 Qdrant memories 集合）
+CREATE TABLE IF NOT EXISTS user_memories (
+  id         TEXT PRIMARY KEY,               -- UUID，同时是 Qdrant point id（update/delete 直达）
+  user_id    TEXT NOT NULL,
+  type       TEXT NOT NULL DEFAULT 'fact',   -- profile | preference | fact | episode
+  content    TEXT NOT NULL,                  -- 一条记忆一事（自然语言短句）
+  confidence REAL NOT NULL DEFAULT 0.8,      -- 置信度（衰减依据，M23c 启用）
+  hits       INTEGER NOT NULL DEFAULT 0,     -- 被召回次数（治理观测：长期零召回 = 衰减候选）
+  status     TEXT NOT NULL DEFAULT 'active', -- active | superseded | deleted（软删保审计）
+  source     JSONB NOT NULL DEFAULT '{}',    -- {distillFrom, distillTo} 溯源（定位产出批次）
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_memories_user ON user_memories(user_id, status);
+-- M23 蒸馏水位：该用户已蒸馏到的全局消息 seq（跨会话幂等增量，与 M4 summarized_seq 同模式）
+ALTER TABLE users ADD COLUMN IF NOT EXISTS distilled_seq INTEGER NOT NULL DEFAULT 0;
 `
 
 // 启动即初始化 schema；挂 no-op catch 防早期 unhandledRejection，真实错误由首个查询处抛出
@@ -367,6 +384,70 @@ export async function getMemory(sessionId) {
 }
 export async function updateMemory(summary, seq, sessionId) {
   await q('UPDATE sessions SET summary = $1, summarized_seq = $2 WHERE id = $3', [summary, seq, sessionId])
+}
+
+// ---- M23 分层记忆 L2：用户长期记忆（蒸馏写入 + 召回 + 自助管理）----
+// 蒸馏水位（user 维度）：该用户所有会话消息蒸馏到哪条全局 seq；GREATEST 推进防并发回退
+export async function getDistillSeq(userId) {
+  return (await q('SELECT distilled_seq FROM users WHERE id = $1', [userId])).rows[0]?.distilled_seq ?? 0
+}
+export async function setDistillSeq(seq, userId) {
+  await q('UPDATE users SET distilled_seq = GREATEST(distilled_seq, $1) WHERE id = $2', [seq, userId])
+}
+// 未蒸馏消息：该用户所有会话中水位之后的消息（跨会话按 seq 升序；limit 保护 prompt 体积）
+export async function listUndistilled(userId, from, limit) {
+  return (
+    await q(
+      `SELECT m.seq, m.role, m.content
+         FROM chat_messages m JOIN sessions s ON s.id = m.session_id
+        WHERE s.user_id = $1 AND m.seq > $2
+        ORDER BY m.seq ASC LIMIT $3`,
+      [userId, from, limit]
+    )
+  ).rows
+}
+// 现有活跃记忆（蒸馏冲突消解上下文；limit 保护 prompt 体积，按最近更新优先）
+export async function listActiveMemories(userId, limit = 50) {
+  return (
+    await q(
+      `SELECT id, type, content FROM user_memories
+        WHERE user_id = $1 AND status = 'active'
+        ORDER BY updated_at DESC LIMIT $2`,
+      [userId, limit]
+    )
+  ).rows
+}
+export async function insertMemory(id, userId, type, content, confidence, source) {
+  await q(
+    'INSERT INTO user_memories (id, user_id, type, content, confidence, source) VALUES ($1, $2, $3, $4, $5, $6::jsonb)',
+    [id, userId, type, content, confidence, jsonParam(source ?? {})]
+  )
+}
+export async function updateMemoryContent(content, id) {
+  await q('UPDATE user_memories SET content = $1, updated_at = now() WHERE id = $2', [content, id])
+}
+// 软删：deleted 对召回不可见（蒸馏 delete 与用户自助删除共用，status 留痕保审计）
+export async function softDeleteMemory(id) {
+  await q("UPDATE user_memories SET status = 'deleted', updated_at = now() WHERE id = $1", [id])
+}
+// 自助管理：列表（不含已删除）
+export async function listMemoriesByUser(userId) {
+  return (
+    await q(
+      `SELECT id, type, content, confidence, hits, status, created_at, updated_at
+         FROM user_memories WHERE user_id = $1 AND status != 'deleted'
+        ORDER BY updated_at DESC`,
+      [userId]
+    )
+  ).rows
+}
+export async function getMemoryRow(id) {
+  return (await q('SELECT * FROM user_memories WHERE id = $1', [id])).rows[0] ?? null
+}
+// 召回回填：命中记忆 hits +1（治理观测；id 为 pg 端 UUID 数组）
+export async function bumpMemoryHits(ids) {
+  if (!ids?.length) return
+  await q('UPDATE user_memories SET hits = hits + 1 WHERE id = ANY($1)', [ids])
 }
 
 // ---- M20 写能力：审批单（HITL）----

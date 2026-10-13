@@ -14,7 +14,7 @@ import { randomUUID } from 'node:crypto'
 import { runAgent } from '../agent/graph.js'
 import { buildAgentSystem } from '../agent/prompts.js'
 import { scanInjection } from '../agent/injection.js'
-import { compressMemory, memoryFallback } from '../agent/memory.js'
+import { compressMemory, memoryFallback, recallMemories, distillUserMemory } from '../agent/memory.js'
 import { rootSpan, runInCtx, flushObs } from '../obs/otel.js'
 import { insertSession, getSession, insertMsg, getMemory, listAfterSeq, getDoc, getStagingFile } from '../store/pg.js'
 import { countPoints } from '../rag/qdrant.js'
@@ -190,16 +190,28 @@ export default async function (app) {
         memoryNote = await memoryFallback(session.id)
       }
 
+      // M23 长期记忆召回：按题检索该用户跨会话记忆（失败/无命中 = null，不阻塞对话）
+      let userMemoryNote = null
+      if (config.memory.user.enabled) {
+        try {
+          userMemoryNote = await recallMemories({ userId: req.user.sub, question })
+        } catch (e) {
+          req.log.warn(`[memory] 长期记忆召回失败: ${e.message}`)
+        }
+      }
+
       // 历史回放：压缩断点之后的所有消息（= 窗口 + 未压缩真空区，零丢失；
       // meta 里的 sources/steps 不回放：一次性过程数据，混进上下文反而干扰模型）
       const boundary = (await getMemory(session.id))?.summarized_seq ?? 0
       const history = (await listAfterSeq(session.id, boundary))
         .map((m) => ({ role: m.role, content: m.content }))
 
-      // 组装最终输入：系统提示 → （可选）空库提示 → （可选）会话记忆摘要 → 断点后历史 → （可选）暂存附件说明 → 当前问题
+      // 组装最终输入：系统提示 → （可选）空库提示 → （可选）用户长期记忆 → （可选）会话记忆摘要 → 断点后历史 → （可选）暂存附件说明 → 当前问题
+      // 注入序：用户级记忆（稳定画像/偏好）放会话摘要（情景材料）之前
       const input = [
         { role: 'system', content: buildAgentSystem() },
         ...(kbEmptyNote ? [{ role: 'system', content: kbEmptyNote }] : []),
+        ...(userMemoryNote ? [{ role: 'system', content: userMemoryNote }] : []),
         ...(memoryNote
           ? [{ role: 'system', content: `（早期对话记忆摘要，供参考）\n${memoryNote}` }]
           : []),
@@ -263,6 +275,14 @@ export default async function (app) {
         // 收尾事件：先 usage 后 done，前端按 done 收尾 UI；traceId 供评估脚本 score 回填关联
         send('usage', { elapsedSec: elapsed, rounds: result.stepCount, ...usage })
         send('done', { stopReason: result.stopReason ?? 'normal', sessionId: session.id, traceId: root.traceId })
+
+        // M23 长期记忆蒸馏：fire-and-forget 不阻塞 SSE 收尾（客户端已拿到 done）；
+        // 水位断点幂等——失败不推进 distilled_seq，下一轮问答自动重蒸同一批
+        if (config.memory.user.enabled) {
+          distillUserMemory({ userId: req.user.sub }).catch((e) =>
+            req.log.warn(`[memory] 长期记忆蒸馏失败: ${e.message}`)
+          )
+        }
       } catch (e) {
         if (clientGone) {
           // 用户主动关闭页面 → 静默收尾，不算服务端错误

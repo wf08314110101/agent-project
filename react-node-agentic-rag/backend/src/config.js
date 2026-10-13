@@ -116,6 +116,15 @@ export const config = {
   // ---- 长会话记忆压缩 ----
   memory: {
     windowSize: int('MEMORY_WINDOW', 20), // 回放窗口：最近 N 条原文恒在上下文（+未压缩真空区，零丢失）
+    // ---- M23 用户长期记忆（分层记忆 L2）：跨会话蒸馏写入 + 按题向量召回 ----
+    user: {
+      enabled: env('USER_MEMORY', 'true') === 'true',        // 总开关：false 时蒸馏与召回完全关闭（零额外成本）
+      distillBatch: int('MEMORY_DISTILL_BATCH', 20),          // 蒸馏攒批：未蒸馏消息 ≥ N 条触发一次（摊薄 LLM 成本）
+      recallTopK: int('MEMORY_RECALL_TOPK', 4),               // 每轮召回条数上限
+      recallMinScore: Number(env('MEMORY_MIN_SCORE', '0.35')), // 召回相似度阈值（余弦，低于丢弃）
+      budgetChars: int('MEMORY_BUDGET_CHARS', 800),           // 注入预算（字符近似；中文 1 token ≈ 1.5~2 字符）
+      collection: env('MEMORY_COLLECTION', 'user_memories'),  // Qdrant 记忆向量集合名（独立于知识库集合）
+    },
   },
 
   // ---- 鉴权（M5 方案 C：预置用户 + JWT 登录；M14 起 access 短效 + refresh 旋转 + token_ver 即刻失效）----

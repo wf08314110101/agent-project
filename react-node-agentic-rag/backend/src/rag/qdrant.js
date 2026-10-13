@@ -295,3 +295,60 @@ export async function scrollDocPoints(docId, hardLimit = 2000, collection = conf
     .sort((a, b) => (a.payload?.chunkIndex ?? 0) - (b.payload?.chunkIndex ?? 0))
     .map((p) => p.payload ?? {})
 }
+
+// ============================================================================
+// M23 用户长期记忆向量层：独立 memories 集合
+// ----------------------------------------------------------------------------
+// 设计取舍：纯稠密路（记忆是短句，语义召回即可，不需要稀疏 BM25 路）；
+// 不量化不调 HNSW（量小）；point id = 记忆 UUID —— upsert 幂等覆盖、删除直达，
+// 无需 filter 查找。userId/type 挂 payload 并建 keyword 索引：召回前服务端过滤
+// （与 documents 的 ACL 下沉同模式），隔离由 filter 强制保证。
+// ============================================================================
+
+/** 幂等创建记忆集合（纯稠密 + userId/type payload 索引）；已存在则跳过 */
+export async function ensureMemoryCollection(collection = config.memory.user.collection) {
+  try {
+    await qdrant.createCollection(collection, {
+      vectors: { dense: { size: config.embed.dim, distance: 'Cosine' } },
+    })
+    await qdrant.createPayloadIndex(collection, { field_name: 'userId', field_schema: 'keyword' })
+    await qdrant.createPayloadIndex(collection, { field_name: 'type', field_schema: 'keyword' })
+    console.log(`[qdrant] 已创建记忆集合 ${collection}（dense/${config.embed.dim} + payload 索引）`)
+  } catch (e) {
+    if (!isAlreadyExists(e)) throw e
+  }
+}
+
+/** 写入/更新记忆向量：point id = 记忆 id（幂等覆盖；embedder 已归一化，余弦直检） */
+export async function upsertMemoryPoint({ id, userId, type, content, vector }) {
+  await qdrant.upsert(
+    config.memory.user.collection,
+    { points: [{ id, vector: { dense: vector }, payload: { memoryId: id, userId, type, text: content } }] },
+    { wait: true }
+  )
+}
+
+/** 删除记忆向量（软删同步；失败由调用方兜底——召回以 pg status 为事实源） */
+export async function deleteMemoryPoint(id) {
+  await qdrant.delete(config.memory.user.collection, { points: [id], wait: true })
+}
+
+/**
+ * 按题召回该用户的记忆：query 向量 + filter user_id 服务端过滤
+ * 集合不存在（该用户首条记忆尚未产生）按空召回处理，不阻塞对话
+ */
+export async function searchMemories({ vector, userId, limit }) {
+  try {
+    const { points } = await qdrant.query(config.memory.user.collection, {
+      query: vector,
+      using: 'dense',
+      limit,
+      with_payload: true,
+      filter: { must: [{ key: 'userId', match: { value: userId } }] },
+    })
+    return points
+  } catch (e) {
+    if (/not found|does not exist/i.test(String(e?.message ?? ''))) return []
+    throw e
+  }
+}
